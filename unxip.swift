@@ -104,7 +104,6 @@ struct File {
 	var data = [UnsafeBufferPointer<UInt8>]()
 	// For keeping the data alive
 	var chunks = [Chunk]()
-	var compressedData: ([UInt8], Int)?
 
 	struct Identifier: Hashable {
 		let dev: Int
@@ -339,7 +338,6 @@ struct Main {
 			func warn(_ result: CInt, _ operation: String) {
 				if result != 0 {
 					perror("\(operation) \(file.name) failed")
-					print("\(file.name.contains(":")) \(file.compressedData != nil)")
 				}
 			}
 
