@@ -131,6 +131,10 @@ struct File {
 				let data = [UInt8](unsafeUninitializedCapacity: blockSize + blockSize / 16) { buffer, count in
 					data[position..<min(position + blockSize, data.endIndex)].withUnsafeBufferPointer { data in
 						count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
+						guard count < buffer.count else {
+							count = 0
+							return
+						}
 					}
 				}
 				return !data.isEmpty ? data : nil
