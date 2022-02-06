@@ -80,7 +80,7 @@ struct ConcurrentStream<TaskResult: Sendable> {
 	}
 }
 
-class Chunk: Sendable {
+final class Chunk: Sendable {
 	let buffer: UnsafeBufferPointer<UInt8>
 	let owned: Bool
 
