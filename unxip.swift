@@ -470,7 +470,7 @@ struct Main {
 	}
 
 	static func main() async throws {
-        precondition(CommandLine.arguments.count > 1, "A XIP File Path to decompress must be specified")
+        	precondition(CommandLine.arguments.count > 1, "A XIP File Path to decompress must be specified")
 		let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: CommandLine.arguments[1]))
 		try handle.seekToEnd()
 		let length = Int(try handle.offset())
