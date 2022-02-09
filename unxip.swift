@@ -217,8 +217,80 @@ struct File {
 	}
 }
 
+extension option {
+	init(name: StaticString, has_arg: CInt, flag: UnsafeMutablePointer<CInt>?, val: StringLiteralType) {
+		let _option = name.withUTF8Buffer {
+			$0.withMemoryRebound(to: CChar.self) {
+				option(name: $0.baseAddress, has_arg: has_arg, flag: flag, val: CInt(UnicodeScalar(val)!.value))
+			}
+		}
+		self = _option
+	}
+}
+
+struct Options {
+	var input: URL
+	var output: URL?
+	var compress: Bool = true
+
+	init() {
+		let options = [
+			option(name: "compression-disable", has_arg: no_argument, flag: nil, val: "c"),
+			option(name: "help", has_arg: no_argument, flag: nil, val: "h"),
+			option(name: nil, has_arg: 0, flag: nil, val: 0),
+		]
+		var result: CInt
+		repeat {
+			result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, "ch", options, nil)
+			if result < 0 {
+				break
+			}
+			switch UnicodeScalar(UInt32(result)) {
+				case "c":
+					compress = false
+				case "h":
+					Self.printUsage(nominally: true)
+				default:
+					Self.printUsage(nominally: false)
+			}
+		} while true
+
+		let arguments = UnsafeBufferPointer(start: CommandLine.unsafeArgv + Int(optind), count: Int(CommandLine.argc - optind)).map {
+			String(cString: $0!)
+		}
+
+		guard let input = arguments.first else {
+			Self.printUsage(nominally: false)
+		}
+
+		self.input = URL(fileURLWithPath: input)
+
+		guard let output = arguments.dropFirst().first else {
+			return
+		}
+
+		self.output = URL(fileURLWithPath: output)
+	}
+
+	static func printUsage(nominally: Bool) -> Never {
+		fputs(
+			"""
+			A fast Xcode unarchiver
+
+			USAGE: unxip [options] <input> [output]
+
+			OPTIONS:
+			    -c, --compression-disable  Disable APFS compression of result.
+			    -h, --help                 Print this help message.
+			""", nominally ? stdout : stderr)
+		exit(nominally ? EXIT_SUCCESS : EXIT_FAILURE)
+	}
+}
+
 @main
 struct Main {
+	static let options = Options()
+
 	static func read<Integer: BinaryInteger, Buffer: RandomAccessCollection>(_ type: Integer.Type, from buffer: inout Buffer) -> Integer where Buffer.Element == UInt8, Buffer.SubSequence == Buffer {
 		defer {
 			buffer = buffer[fromOffset: MemoryLayout<Integer>.size]
@@ -406,7 +478,9 @@ struct Main {
 								setStickyBit(on: file)
 							}
 
-							guard !(await file.writeCompressedIfPossible(usingDescriptor: fd)) else {
+							if options.compress,
+								await file.writeCompressedIfPossible(usingDescriptor: fd)
+							{
 								return
 							}
 
@@ -470,13 +544,20 @@ struct Main {
 	}
 
 	static func main() async throws {
-		let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: CommandLine.arguments[1]))
+		let handle = try FileHandle(forReadingFrom: options.input)
 		try handle.seekToEnd()
 		let length = Int(try handle.offset())
 		let file = UnsafeBufferPointer(start: mmap(nil, length, PROT_READ, MAP_PRIVATE, handle.fileDescriptor, 0).bindMemory(to: UInt8.self, capacity: length), count: length)
 		precondition(UnsafeMutableRawPointer(mutating: file.baseAddress) != MAP_FAILED)
 		defer {
 			munmap(UnsafeMutableRawPointer(mutating: file.baseAddress), length)
+		}
+
+		if let output = options.output {
+			guard chdir(output.path) == 0 else {
+				fputs("Failed to access output directory at \(output.path): \(String(cString: strerror(errno)))", stderr)
+				exit(EXIT_FAILURE)
+			}
 		}
 
 		await parseContent(locateContent(in: file))
