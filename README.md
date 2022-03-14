@@ -4,7 +4,13 @@ unxip is a command line-tool designed for rapidly unarchiving Xcode XIP files an
 
 ## Installation
 
-Not much installation is needed to use unxip: simply download unxip.swift and compile it using `swiftc -parse-as-library -O unxip.swift` to produce the `unxip` binary.
+Not much installation is needed to use unxip: simply clone the repository and build the executable target to produce the `unxip` binary.
+
+```bash
+swift build -c release
+sudo cp -f .build/release/unxip /usr/local/bin/unxip
+unxip -h
+```
 
 ## Usage
 
