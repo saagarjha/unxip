@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
 	name: "unxip",
-	platforms: [.macOS(.v12)],
+	platforms: [.macOS(.v11)],
 	products: [
 		.executable(name: "unxip", targets: ["unxip"]),
 		.library(name: "UnxipFramework", targets: ["UnxipFramework"]),
