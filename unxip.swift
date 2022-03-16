@@ -127,8 +127,9 @@ struct File {
 			compressionStream.addTask {
 				try Task.checkCancellation()
 				let position = _position
-				let data = [UInt8](unsafeUninitializedCapacity: blockSize + blockSize / 16) { buffer, count in
-					data[position..<min(position + blockSize, data.endIndex)].withUnsafeBufferPointer { data in
+				let end = min(position + blockSize, data.endIndex)
+				let data = [UInt8](unsafeUninitializedCapacity: (end - position) + (end - position) / 16) { buffer, count in
+					data[position..<end].withUnsafeBufferPointer { data in
 						count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
 						guard count < buffer.count else {
 							count = 0
