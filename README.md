@@ -2,9 +2,19 @@
 
 unxip is a command line-tool designed for rapidly unarchiving Xcode XIP files and writing them to disk with good compression. Its goal is to outperform Bom (which powers `xip(1)` and Archive Utility) in both performance and on-disk usage, and (at the time of writing) does so by a factor of about 2-3x in time spent decompressing and about 8% in space.
 
-## Installation
+## Compiling
 
-Not much installation is needed to use unxip: simply download unxip.swift and compile it using `swiftc -parse-as-library -O unxip.swift` to produce the `unxip` binary.
+To build a Universal 2 (arm64/x86_64) executable, run:
+
+```console
+$ swift build -c release --arch arm64 --arch x86_64
+```
+
+The resulting executable will be located at:
+
+```
+./.build/apple/Products/Release/unxip
+```
 
 ## Usage
 
