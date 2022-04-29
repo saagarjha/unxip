@@ -26,6 +26,14 @@ $ unxip Xcode_13.3_beta.xip # will produce Xcode-beta.app in the current directo
 
 As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem. **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
 
+## Contributing
+
+When making changes, be sure to use [swift-format](https://github.com/apple/swift-format) on the source:
+
+```console
+$ swift-format -i *.swift
+```
+
 ## Design
 
 As a purpose-built tool, unxip outperforms Bom because of several key implementation decisions. Heavy use of [Swift Concurrency](https://docs.swift.org/swift-book/LanguageGuide/Concurrency.html) allows unxip to unlock parallelization opportunities that Bom largely misses, and the use of [LZFSE](https://en.wikipedia.org/wiki/LZFSE) rather than the simpler LZVN gives it higher compression ratios. To understand its design, it's important to first be familiar with the Xcode XIP format and APFS transparent compression.
