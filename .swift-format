@@ -1,0 +1,8 @@
+{
+	"indentation": {
+		"tabs": 1
+	},
+	"indentSwitchCaseLabels": true,
+	"lineLength": 10000,
+	"tabWidth": 4
+}
