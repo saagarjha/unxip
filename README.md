@@ -2,26 +2,36 @@
 
 unxip is a command line-tool designed for rapidly unarchiving Xcode XIP files and writing them to disk with good compression. Its goal is to outperform Bom (which powers `xip(1)` and Archive Utility) in both performance and on-disk usage, and (at the time of writing) does so by a factor of about 2-3x in time spent decompressing and about 8% in space.
 
-## Compiling
+## Installation
 
-To build a Universal 2 (arm64/x86_64) executable, run:
+The easiest way to install unxip is to grab a precompiled binary for macOS 12.0 and later from the [releases page](https://github.com/saagarjha/unxip/releases/latest). If you prefer, you can also install unxip from your package manager by adding https://github.com/saagarjha/ports to your list of MacPorts sources, or tapping [saagarjha/tap](https://github.com/saagarjha/homebrew-tap) if you're using Homebrew. Both will make the latest version of the command available under the package name "unxip".
+
+## Building
+
+unxip is fairly simple and implemented as a [single file](./unxip.swift). Thus, you can build it by compiling that file directly, with just an up-to-date version of the Command Line Tools (`xcode-select --install`):
+
+```console
+$ swiftc -parse-as-library -O unxip.swift
+```
+
+This will build an optimized unxip binary for your computer's native architecture. Because unxip uses Swift Concurrency, it is recommended that you build on macOS Monterey or later; macOS Big Sur is technically supported but needs to use backdeployment libraries that are not very easy to distribute with a command line tool.
+
+If you prefer to use Swift Package Manager to build your code, a Package.swift is also available. This has the downside of requiring a full Xcode installation to bootstrap the build, but makes it easy to build a Universal binary:
 
 ```console
 $ swift build -c release --arch arm64 --arch x86_64
 ```
 
-The resulting executable will be located at:
+When run from the project root, the resulting executable will be located at .build/apple/Products/Release/unxip.
 
-```
-./.build/apple/Products/Release/unxip
-```
+unxip is not currently designed to be embedded directly into the address space of another application. While it would "work" (with minor modifications to allow linking) its implementation expects to be the only user of the cooperative thread pool and effectively takes it over, which may adversely affect other code that wishes to run on it. The recommended way to use unxip is spawning it as a subtask.
 
 ## Usage
 
 The intended usage of unxip is with a single command line parameter that represents the path to an XIP from Apple that contains Xcode. For example:
 
 ```console
-$ unxip Xcode_13.3_beta.xip # will produce Xcode-beta.app in the current directory
+$ unxip Xcode.xip # will produce Xcode.app in the current directory
 ```
 
 As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem. **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
