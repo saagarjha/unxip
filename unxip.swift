@@ -416,7 +416,7 @@ struct Main {
 
 			// The assumption is that all directories are provided without trailing slashes
 			func parentDirectory<S: StringProtocol>(of path: S) -> S.SubSequence {
-				return path[..<path.lastIndex(of: "/")!]
+				path[..<path.lastIndex(of: "/")!]
 			}
 
 			// https://bugs.swift.org/browse/SR-15816
@@ -435,9 +435,11 @@ struct Main {
 				continue
 			}
 
-			if let (original, task) = hardlinks[file.identifier] {
+			if let (original, originalTask) = hardlinks[file.identifier] {
+				let task = parentDirectoryTask(for: file)
+				assert(task != nil, file.name)
 				_ = taskStream.addRunningTask {
-					await task.value
+					_ = await (originalTask.value, task?.value)
 					warn(link(original, file.name), "linking")
 				}
 				continue
@@ -450,6 +452,7 @@ struct Main {
 					let task = parentDirectoryTask(for: file)
 					assert(task != nil, file.name)
 					_ = taskStream.addRunningTask {
+						await task?.value
 						warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8), file.name), "symlinking")
 						setStickyBit(on: file)
 					}
