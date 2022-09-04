@@ -114,7 +114,7 @@ struct File {
 		Identifier(dev: dev, ino: ino)
 	}
 
-	func writeCompressedIfPossible(usingDescriptor descriptor: CInt) async -> Bool {
+	func compressedData() async -> [UInt8]? {
 		let blockSize = 64 << 10  // LZFSE with 64K block size
 		var _data = [UInt8]()
 		_data.reserveCapacity(self.data.map(\.count).reduce(0, +))
@@ -146,17 +146,17 @@ struct File {
 			if let chunk = chunk {
 				chunks.append(chunk)
 			} else {
-				return false
+				return nil
 			}
 		}
 
 		let tableSize = (chunks.count + 1) * MemoryLayout<UInt32>.size
 		let size = tableSize + chunks.map(\.count).reduce(0, +)
 		guard size < data.count else {
-			return false
+			return nil
 		}
 
-		let buffer = [UInt8](unsafeUninitializedCapacity: size) { buffer, count in
+		return [UInt8](unsafeUninitializedCapacity: size) { buffer, count in
 			var position = tableSize
 
 			func writePosition(toTableIndex index: Int) {
@@ -174,7 +174,9 @@ struct File {
 			}
 			count = size
 		}
+	}
 
+	func write(compressedData data: [UInt8], toDescriptor descriptor: CInt) -> Bool {
 		let attribute =
 			"cmpf".utf8.reversed()  // magic
 			+ [0x0c, 0x00, 0x00, 0x00]  // LZFSE, 64K chunks
@@ -204,11 +206,11 @@ struct File {
 		var written: Int
 		repeat {
 			// TODO: handle partial writes smarter
-			written = pwrite(resourceForkDescriptor, buffer, buffer.count, 0)
+			written = pwrite(resourceForkDescriptor, data, data.count, 0)
 			guard written >= 0 else {
 				return false
 			}
-		} while written != buffer.count
+		} while written != data.count
 
 		guard fchflags(descriptor, UInt32(UF_COMPRESSED)) == 0 else {
 			return false
@@ -230,27 +232,38 @@ extension option {
 }
 
 struct Options {
+	static let options: [(flag: String, name: StaticString, description: StringLiteralType)] = [
+		("c", "compression-disable", "Disable APFS compression of result."),
+		("h", "help", "Print this help message."),
+		("n", "dry-run", "Dry run. (Often useful with -v.)"),
+		("v", "verbose", "Print xip file contents."),
+	]
+
 	var input: URL
 	var output: URL?
 	var compress: Bool = true
+	var dryRun: Bool = false
+	var verbose: Bool = false
 
 	init() {
-		let options = [
-			option(name: "compression-disable", has_arg: no_argument, flag: nil, val: "c"),
-			option(name: "help", has_arg: no_argument, flag: nil, val: "h"),
-			option(name: nil, has_arg: 0, flag: nil, val: 0),
-		]
-		var result: CInt
+		let options =
+			Self.options.map {
+				option(name: $0.name, has_arg: no_argument, flag: nil, val: $0.flag)
+			} + [option(name: nil, has_arg: 0, flag: nil, val: 0)]
 		repeat {
-			result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, "ch", options, nil)
+			let result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, Self.options.map(\.flag).reduce("", +), options, nil)
 			if result < 0 {
 				break
 			}
 			switch UnicodeScalar(UInt32(result)) {
 				case "c":
 					compress = false
+				case "n":
+					dryRun = true
 				case "h":
 					Self.printUsage(nominally: true)
+				case "v":
+					verbose = true
 				default:
 					Self.printUsage(nominally: false)
 			}
@@ -281,9 +294,17 @@ struct Options {
 			USAGE: unxip [options] <input> [output]
 
 			OPTIONS:
-			    -c, --compression-disable  Disable APFS compression of result.
-			    -h, --help                 Print this help message.
+			
 			""", nominally ? stdout : stderr)
+
+		assert(options.map(\.flag) == options.map(\.flag).sorted())
+		let maxWidth = options.map(\.name.utf8CodeUnitCount).max()!
+		for option in options {
+			let line = "    -\(option.flag), --\(option.name.description.padding(toLength: maxWidth, withPad: " ", startingAt: 0))  \(option.description)\n"
+			assert(line.count <= 80)
+			fputs(line, nominally ? stdout : stderr)
+		}
+
 		exit(nominally ? EXIT_SUCCESS : EXIT_FAILURE)
 	}
 }
@@ -435,11 +456,19 @@ struct Main {
 				continue
 			}
 
+			if options.verbose {
+				print(file.name)
+			}
+
 			if let (original, originalTask) = hardlinks[file.identifier] {
 				let task = parentDirectoryTask(for: file)
 				assert(task != nil, file.name)
 				_ = taskStream.addRunningTask {
 					_ = await (originalTask.value, task?.value)
+					guard !options.dryRun else {
+						return
+					}
+
 					warn(link(original, file.name), "linking")
 				}
 				continue
@@ -453,6 +482,10 @@ struct Main {
 					assert(task != nil, file.name)
 					_ = taskStream.addRunningTask {
 						await task?.value
+						guard !options.dryRun else {
+							return
+						}
+
 						warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8), file.name), "symlinking")
 						setStickyBit(on: file)
 					}
@@ -461,6 +494,10 @@ struct Main {
 					assert(task != nil || parentDirectory(of: file.name) == ".", file.name)
 					directories[file.name[...]] = taskStream.addRunningTask {
 						await task?.value
+						guard !options.dryRun else {
+							return
+						}
+
 						warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
 						setStickyBit(on: file)
 					}
@@ -471,6 +508,10 @@ struct Main {
 						file.name,
 						taskStream.addRunningTask {
 							await task?.value
+							let compressedData = options.compress ? await file.compressedData() : nil
+							guard !options.dryRun else {
+								return
+							}
 
 							let fd = open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
 							if fd < 0 {
@@ -482,8 +523,8 @@ struct Main {
 								setStickyBit(on: file)
 							}
 
-							if options.compress,
-								await file.writeCompressedIfPossible(usingDescriptor: fd)
+							if let compressedData = compressedData,
+								file.write(compressedData: compressedData, toDescriptor: fd)
 							{
 								return
 							}
