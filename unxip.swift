@@ -233,11 +233,13 @@ extension option {
 
 struct Options {
 	static let options: [(flag: String, name: StaticString, description: StringLiteralType)] = [
+		("V", "version", "Print the unxip version number."),
 		("c", "compression-disable", "Disable APFS compression of result."),
 		("h", "help", "Print this help message."),
 		("n", "dry-run", "Dry run. (Often useful with -v.)"),
 		("v", "verbose", "Print xip file contents."),
 	]
+	static let version = "1.1.1"
 
 	var input: URL
 	var output: URL?
@@ -262,6 +264,8 @@ struct Options {
 					dryRun = true
 				case "h":
 					Self.printUsage(nominally: true)
+				case "V":
+					Self.printVersion()
 				case "v":
 					verbose = true
 				default:
@@ -284,6 +288,11 @@ struct Options {
 		}
 
 		self.output = URL(fileURLWithPath: output)
+	}
+	
+	static func printVersion() -> Never {
+		print("unxip \(version)")
+		exit(EXIT_SUCCESS)
 	}
 
 	static func printUsage(nominally: Bool) -> Never {
