@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+      branches: [master]
+
+jobs:
+  test:
+    runs-on: macos-12
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install xcodes
+        run: brew install robotsandpencils/made/xcodes
+
+      - name: Download Xcode
+        run: xcodes download --directory "$PWD" 14.0.1
+
+      - name: Build unxip
+        run: swift build --configuration release
+
+      - name: Run unxip
+        run: .build/release/unxip Xcode-14.0.1+14A400.xip
+
+        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
+        # finds problems. The Xcode bundle has a ruby symlink that is recursive,
+        # which trips this. So don't rely on the status, but instead use the
+        # output exclusively.
+      - name: Validate Xcode
+        run: diff -r Xcode.app /Applications/Xcode_14.0.1.app > diff || true; cat diff && ! test -s diff
