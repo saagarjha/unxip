@@ -177,18 +177,19 @@ struct File {
 	}
 
 	func write(compressedData data: [UInt8], toDescriptor descriptor: CInt) -> Bool {
+		let uncompressedSize = self.data.map(\.count).reduce(0, +)
 		let attribute =
 			"cmpf".utf8.reversed()  // magic
 			+ [0x0c, 0x00, 0x00, 0x00]  // LZFSE, 64K chunks
 			+ ([
-				(data.count >> 0) & 0xff,
-				(data.count >> 8) & 0xff,
-				(data.count >> 16) & 0xff,
-				(data.count >> 24) & 0xff,
-				(data.count >> 32) & 0xff,
-				(data.count >> 40) & 0xff,
-				(data.count >> 48) & 0xff,
-				(data.count >> 56) & 0xff,
+				(uncompressedSize >> 0) & 0xff,
+				(uncompressedSize >> 8) & 0xff,
+				(uncompressedSize >> 16) & 0xff,
+				(uncompressedSize >> 24) & 0xff,
+				(uncompressedSize >> 32) & 0xff,
+				(uncompressedSize >> 40) & 0xff,
+				(uncompressedSize >> 48) & 0xff,
+				(uncompressedSize >> 56) & 0xff,
 			].map(UInt8.init) as [UInt8])
 
 		guard fsetxattr(descriptor, "com.apple.decmpfs", attribute, attribute.count, 0, XATTR_SHOWCOMPRESSION) == 0 else {
