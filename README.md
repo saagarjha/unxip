@@ -4,7 +4,7 @@ unxip is a command-line tool designed for rapidly unarchiving Xcode XIP files an
 
 ## Installation
 
-The easiest way to install unxip is to grab a precompiled binary for macOS 12.0 and later from the [releases page](https://github.com/saagarjha/unxip/releases/latest). If you prefer, you can also install unxip from your package manager by adding https://github.com/saagarjha/ports to your list of MacPorts sources, or tapping [saagarjha/tap](https://github.com/saagarjha/homebrew-tap) if you're using Homebrew. Both will make the latest version of the command available under the package name "unxip".
+The easiest way to install unxip is to grab a precompiled binary for macOS 12.0 and later from the [releases page](https://github.com/saagarjha/unxip/releases/latest). If you prefer, you can also install unxip from your package manager: it's [available on MacPorts](https://ports.macports.org/port/unxip/), or you could tap [saagarjha/tap](https://github.com/saagarjha/homebrew-tap) if you're using Homebrew. Both will make the latest version of the command available under the package name "unxip".
 
 ## Building
 
