@@ -8,20 +8,24 @@ on:
 jobs:
   test:
     runs-on: macos-12
+    environment: ci
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install xcodes
-        run: brew install robotsandpencils/made/xcodes
-
       - name: Download Xcode
-        run: xcodes download --directory "$PWD" 14.0.1
+        run: wget http://server.saagarjha.com/Xcode_14.0.1.xip.encrypted
+
+        # I don't hate you, I just don't want to get sued
+      - name: Decrypt Xcode
+        env:
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_14.0.1.xip.encrypted > Xcode_14.0.1.xip
 
       - name: Build unxip
         run: swift build --configuration release
 
       - name: Run unxip
-        run: .build/release/unxip Xcode-14.0.1+14A400.xip
+        run: .build/release/unxip Xcode_14.0.1.xip
 
         # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
         # finds problems. The Xcode bundle has a ruby symlink that is recursive,
