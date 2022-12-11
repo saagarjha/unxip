@@ -24,6 +24,15 @@ $ swift build -c release --arch arm64 --arch x86_64
 
 When run from the project root, the resulting executable will be located at .build/apple/Products/Release/unxip.
 
+Finally, you may also use the provided Makefile to build and install unxip:
+
+```console
+$ make all
+$ make install
+```
+
+The installation prefix is configurable via the `PREFIX` variable.
+
 unxip is not currently designed to be embedded directly into the address space of another application. While it would "work" (with minor modifications to allow linking) its implementation expects to be the only user of the cooperative thread pool and effectively takes it over, which may adversely affect other code that wishes to run on it. The recommended way to use unxip is spawning it as a subtask.
 
 ## Usage
