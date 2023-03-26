@@ -642,7 +642,7 @@ struct Main {
 					let remaining = _remaining
 					let decompressedSize = _decompressedSize
 					let previousYield = _previousYield
-					let chunk = Chunk(buffer: UnsafeBufferPointer(rebasing: remaining[fromOffset: 0, size: Int(compressedSize)]), decompressedSize: compressedSize == chunkSize ? nil : Int(decompressedSize))
+					let chunk = Chunk(buffer: UnsafeBufferPointer(rebasing: remaining[fromOffset: 0, size: Int(compressedSize)]), decompressedSize: compressedSize == decompressedSize ? nil : Int(decompressedSize))
 					_ = await previousYield?.result
 					await chunkStream.yield(chunk)
 				}
