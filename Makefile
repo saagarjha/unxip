@@ -4,7 +4,7 @@ PREFIX		?= /usr/local
 all: unxip
 
 unxip: unxip.swift
-	swiftc -parse-as-library -O $<
+	swiftc -O -whole-module-optimization -parse-as-library $<
 
 .PHONY: clean
 clean:
