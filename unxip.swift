@@ -1,6 +1,15 @@
 import Compression
 import Foundation
 
+#if PROFILING
+	import os
+
+	let readLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.read", category: "Read") : .disabled
+	let decompressionLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.chunk", category: "Decompression") : .disabled
+	let compressionLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.compression", category: "Compression") : .disabled
+	let filesystemLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.filesystem", category: "Filesystem") : .disabled
+#endif
+
 extension RandomAccessCollection {
 	subscript(fromOffset fromOffset: Int = 0, toOffset toOffset: Int? = nil) -> SubSequence {
 		let toOffset = toOffset ?? count
@@ -444,6 +453,11 @@ struct File {
 		let data = self.data.reduce(into: _data, +=)
 		let compressionStream = ConcurrentStream<[UInt8]?>()
 
+		#if PROFILING
+			let id = OSSignpostID(log: compressionLog)
+			os_signpost(.begin, log: compressionLog, name: "Data compression", signpostID: id, "Starting compression of %s (uncompressed size = %td)", name, data.count)
+		#endif
+
 		Task {
 			var position = data.startIndex
 
@@ -475,6 +489,9 @@ struct File {
 				if let chunk = chunk {
 					chunks.append(chunk)
 				} else {
+					#if PROFILING
+						os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (did not compress)")
+					#endif
 					return nil
 				}
 			}
@@ -484,6 +501,13 @@ struct File {
 
 		let tableSize = (chunks.count + 1) * MemoryLayout<UInt32>.size
 		let size = tableSize + chunks.map(\.count).reduce(0, +)
+
+		#if PROFILING
+			defer {
+				os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (compressed size = %td)", size)
+			}
+		#endif
+
 		guard size < data.count else {
 			return nil
 		}
@@ -538,11 +562,18 @@ struct File {
 
 		var written: Int
 		repeat {
+			#if PROFILING
+				let id = OSSignpostID(log: filesystemLog)
+				os_signpost(.begin, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Starting compressed pwrite for %s", name)
+			#endif
 			// TODO: handle partial writes smarter
 			written = pwrite(resourceForkDescriptor, data, data.count, 0)
 			guard written >= 0 else {
 				return false
 			}
+			#if PROFILING
+				os_signpost(.end, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Ended")
+			#endif
 		} while written != data.count
 
 		guard fchflags(descriptor, UInt32(UF_COMPRESSED)) == 0 else {
@@ -662,6 +693,10 @@ struct Main {
 
 		Task {
 			while await withCheckedContinuation({ continuation in
+				#if PROFILING
+					let id = OSSignpostID(log: readLog)
+					os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
+				#endif
 				var chunk = DispatchData.empty
 				io.read(offset: 0, length: Int(PIPE_SIZE * 16), queue: .main) { done, data, error in
 					guard error == 0 else {
@@ -672,11 +707,21 @@ struct Main {
 
 					chunk.append(data!)
 
+					#if PROFILING
+						os_signpost(.event, log: readLog, name: "Read", signpostID: id, "Read %td bytes", data!.count)
+					#endif
+
 					if done {
 						if chunk.isEmpty {
+							#if PROFILING
+								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended final read")
+							#endif
 							stream.finish()
 							continuation.resume(returning: false)
 						} else {
+							#if PROFILING
+								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
+							#endif
 							let chunk = chunk
 							Task {
 								await stream.yield(
@@ -709,6 +754,7 @@ struct Main {
 			let chunkSize = try await content.read(UInt64.self)
 			var decompressedSize: UInt64 = 0
 			var previousYield: Task<Void, Error>?
+			var chunkNumber = 0
 
 			repeat {
 				decompressedSize = try await content.read(UInt64.self)
@@ -717,13 +763,23 @@ struct Main {
 				let block = try await content.read(Int(compressedSize))
 				let _decompressedSize = decompressedSize
 				let _previousYield = previousYield
+				let _chunkNumber = chunkNumber
 				previousYield = await decompressionStream.addTask {
 					let decompressedSize = _decompressedSize
 					let previousYield = _previousYield
+					let chunkNumber = _chunkNumber
+					#if PROFILING
+						let id = OSSignpostID(log: decompressionLog)
+						os_signpost(.begin, log: decompressionLog, name: "Decompress", signpostID: id, "Starting %td (compressed size = %td)", chunkNumber, compressedSize)
+					#endif
 					let chunk = Chunk(data: block, decompressedSize: compressedSize == chunkSize ? nil : Int(decompressedSize))
+					#if PROFILING
+						os_signpost(.end, log: decompressionLog, name: "Decompress", signpostID: id, "Ended %td (decompressed size = %td)", chunkNumber, decompressedSize)
+					#endif
 					_ = await previousYield?.result
 					await chunkStream.yield(chunk)
 				}
+				chunkNumber += 1
 			} while decompressedSize == chunkSize
 			await decompressionStream.finish()
 		}
@@ -803,6 +859,18 @@ struct Main {
 
 		for try await file in files(in: chunks(from: content)) {
 			@Sendable
+			func measureFilesystemOperation<T>(named name: StaticString, _ operation: () -> T) -> T {
+				#if PROFILING
+					let id = OSSignpostID(log: filesystemLog)
+					os_signpost(.begin, log: filesystemLog, name: name, signpostID: id, "Starting %s for %s", name.description, file.name)
+					defer {
+						os_signpost(.end, log: filesystemLog, name: name, signpostID: id, "Completed")
+					}
+				#endif
+				return operation()
+			}
+
+			@Sendable
 			func warn(_ result: CInt, _ operation: String) {
 				if result != 0 {
 					perror("\(operation) \(file.name) failed")
@@ -822,7 +890,10 @@ struct Main {
 			@Sendable
 			func setStickyBit(on file: File) {
 				if file.mode & Int(C_ISVTX) != 0 {
-					warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
+					measureFilesystemOperation(named: "chmod") {
+						warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
+					}
+
 				}
 			}
 
@@ -843,7 +914,9 @@ struct Main {
 						return
 					}
 
-					warn(link(original, file.name), "linking")
+					measureFilesystemOperation(named: "link") {
+						warn(link(original, file.name), "linking")
+					}
 				}
 				continue
 			}
@@ -860,7 +933,9 @@ struct Main {
 							return
 						}
 
-						warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8), file.name), "symlinking")
+						measureFilesystemOperation(named: "symlink") {
+							warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8), file.name), "symlinking")
+						}
 						setStickyBit(on: file)
 					}
 				case C_ISDIR:
@@ -872,7 +947,9 @@ struct Main {
 							return
 						}
 
-						warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
+						measureFilesystemOperation(named: "mkdir") {
+							warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
+						}
 						setStickyBit(on: file)
 					}
 				case C_ISREG:
@@ -893,13 +970,17 @@ struct Main {
 								return
 							}
 
-							let fd = open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+							let fd = measureFilesystemOperation(named: "open") {
+								open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+							}
 							if fd < 0 {
 								warn(fd, "creating file at")
 								return
 							}
 							defer {
-								warn(close(fd), "closing")
+								measureFilesystemOperation(named: "close") {
+									warn(close(fd), "closing")
+								}
 								setStickyBit(on: file)
 							}
 
@@ -914,8 +995,10 @@ struct Main {
 								var written = 0
 								// TODO: handle partial writes smarter
 								repeat {
-									written = data.withUnsafeBytes {
-										pwrite(fd, $0.baseAddress, data.count, off_t(position))
+									written = data.withUnsafeBytes { data in
+										measureFilesystemOperation(named: "pwrite") {
+											pwrite(fd, data.baseAddress, data.count, off_t(position))
+										}
 									}
 									if written < 0 {
 										warn(-1, "writing chunk to")
