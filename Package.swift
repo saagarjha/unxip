@@ -17,7 +17,7 @@ let package = Package(
 				"LICENSE",
 				"README.md",
 				"release.sh",
-				"Makefile"
+				"Makefile",
 			],
 			sources: ["unxip.swift"]
 		)
