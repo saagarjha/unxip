@@ -16,6 +16,8 @@ let package = Package(
 			exclude: [
 				"LICENSE",
 				"README.md",
+				"release.sh",
+				"Makefile"
 			],
 			sources: ["unxip.swift"]
 		)
