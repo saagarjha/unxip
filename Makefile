@@ -1,4 +1,4 @@
-PREFIX		?= /usr/local
+PREFIX ?= /usr/local
 
 .PHONY: all
 all: unxip
@@ -9,7 +9,7 @@ unxip: unxip.swift
 .PHONY: clean
 clean:
 	rm unxip
-	
+
 .PHONY: install
 install:
 	install unxip $(PREFIX)/bin/
@@ -17,3 +17,7 @@ install:
 .PHONY: uninstall
 uninstall:
 	rm $(PREFIX)/bin/unxip
+
+.PHONY: format
+format:
+	swift-format -i *.swift
