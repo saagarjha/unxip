@@ -12,15 +12,16 @@ on:
       - 'Makefile'
       - '.github/workflows/*'
     branches:
-      - master
+      - main
 
 jobs:
-  build:
-    name: Build
+  test:
+    name: Test
     runs-on: macos-12
     environment: ci
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v3
 
       - name: Download Xcode
         run: wget http://server.saagarjha.com/Xcode_14.0.1.xip.encrypted
@@ -37,9 +38,9 @@ jobs:
       - name: Run unxip
         run: .build/release/unxip Xcode_14.0.1.xip
 
-        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if
-        # it finds problems. The Xcode bundle has a Ruby symlink that is
-        # recursive, which trips this. So don't rely on the status, but
-        # instead use the output exclusively.
+        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
+        # finds problems. The Xcode bundle has a ruby symlink that is recursive,
+        # which trips this. So don't rely on the status, but instead use the
+        # output exclusively.
       - name: Validate Xcode
         run: diff -r Xcode.app /Applications/Xcode_14.0.1.app > diff || true; cat diff && ! test -s diff
