@@ -2,11 +2,21 @@ name: CI
 
 on:
   push:
+    paths:
+      - '*.swift'
+      - 'Makefile'
+      - '.github/workflows/*'
   pull_request:
-      branches: [master]
+    paths:
+      - '*.swift'
+      - 'Makefile'
+      - '.github/workflows/*'
+    branches:
+      - master
 
 jobs:
-  test:
+  build:
+    name: Build
     runs-on: macos-12
     environment: ci
     steps:
@@ -27,9 +37,9 @@ jobs:
       - name: Run unxip
         run: .build/release/unxip Xcode_14.0.1.xip
 
-        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
-        # finds problems. The Xcode bundle has a ruby symlink that is recursive,
-        # which trips this. So don't rely on the status, but instead use the
-        # output exclusively.
+        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if
+        # it finds problems. The Xcode bundle has a Ruby symlink that is
+        # recursive, which trips this. So don't rely on the status, but
+        # instead use the output exclusively.
       - name: Validate Xcode
         run: diff -r Xcode.app /Applications/Xcode_14.0.1.app > diff || true; cat diff && ! test -s diff
