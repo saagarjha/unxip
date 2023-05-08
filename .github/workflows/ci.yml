@@ -2,15 +2,26 @@ name: CI
 
 on:
   push:
+    paths:
+      - '*.swift'
+      - 'Makefile'
+      - '.github/workflows/*'
   pull_request:
-      branches: [master]
+    paths:
+      - '*.swift'
+      - 'Makefile'
+      - '.github/workflows/*'
+    branches:
+      - main
 
 jobs:
   test:
+    name: Test
     runs-on: macos-12
     environment: ci
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v3
 
       - name: Download Xcode
         run: wget http://server.saagarjha.com/Xcode_14.0.1.xip.encrypted
