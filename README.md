@@ -49,7 +49,7 @@ As the tool is still somewhat rough, its error handling is not very good at the 
 
 **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
 
-Alternately you can download it download and unxip like this:
+Alternately you can download and unxip like this:
 
 ```
 curl 'https://download.developer.apple.com/Developer_Tools/Xcode_15_beta/Xcode_15_beta.xip' \
