@@ -43,7 +43,21 @@ The intended usage of unxip is with a single command line parameter that represe
 $ unxip Xcode.xip # will produce Xcode.app in the current directory
 ```
 
-As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem. **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
+As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that:
+- The directory you are running unxip from does not contain any existing Xcode(-beta).app bundles
+- You're using a modern version of macOS on a fast APFS filesystem. 
+
+**For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
+
+Alternately you can download it download and unxip like this:
+
+```
+curl 'https://download.developer.apple.com/Developer_Tools/Xcode_15_beta/Xcode_15_beta.xip' \
+--cookie 'ADCDownloadAuth=<GET_THIS_FROM_APPLE_DEVELOPER_PORTAL'| unxip -
+```
+
+You can get your `ADCDownloadAuth` from Developer Portal, by sniffing the request of something you attempted to download. 
+
 
 ## Contributing
 
