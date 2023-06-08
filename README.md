@@ -53,19 +53,10 @@ Alternately you can download it download and unxip like this:
 
 ```
 curl 'https://download.developer.apple.com/Developer_Tools/Xcode_15_beta/Xcode_15_beta.xip' \
--H 'Host: download.developer.apple.com' \
--H 'Sec-Fetch-Site: same-site' \
--H 'Connection: keep-alive' \
--H 'Sec-Fetch-Mode: navigate' \
--H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
--H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15' \
--H 'Referer: https://developer.apple.com/' \
--H 'Sec-Fetch-Dest: document' \
--H 'Accept-Language: en-US,en;q=0.9' \
---cookie 'ADCDownloadAuth=<GET_THIS_FROM_APPLE_DEVELOPER> | unxip - 
+--cookie 'ADCDownloadAuth=<GET_THIS_FROM_APPLE_DEVELOPER_PORTAL'| unxip -
 ```
 
-You can get your `ADCDownloadAuth` from Developer Portal, by sniffing the request for a sample download. 
+You can get your `ADCDownloadAuth` from Developer Portal, by sniffing the request of something you attempted to download. 
 
 
 ## Contributing
