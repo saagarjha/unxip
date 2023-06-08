@@ -45,6 +45,12 @@ $ unxip Xcode.xip # will produce Xcode.app in the current directory
 
 As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem. **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
 
+Alternatively, by passing in “-“ as your filename unxip will now read directly from stdin and starts work immediately. Here's an example:
+
+```console
+$ curl ... | unxip -
+```
+
 ## Contributing
 
 When making changes, be sure to use [swift-format](https://github.com/apple/swift-format) on the source:
