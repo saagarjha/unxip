@@ -51,6 +51,8 @@ Alternatively, by passing in “-“ as your filename unxip will now read direct
 $ curl ... | unxip -
 ```
 
+To get a working curl request, you can start a download in developer.apple.com/downloads with the network tab open in the developer console of Firefox/Chrome/Arc and do "copy as CURL"
+
 ## Contributing
 
 When making changes, be sure to use [swift-format](https://github.com/apple/swift-format) on the source:
