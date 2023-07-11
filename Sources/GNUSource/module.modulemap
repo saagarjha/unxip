@@ -1,0 +1,4 @@
+module GNUSource [system] {
+	header "gnusource.h"
+	export *
+}

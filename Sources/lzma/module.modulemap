@@ -1,0 +1,5 @@
+module lzma [system] {
+	header "lzma.h"
+	link "lzma"
+	export *
+}

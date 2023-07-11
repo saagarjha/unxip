@@ -1,5 +1,14 @@
-import Compression
 import Foundation
+
+#if os(macOS)
+	import Compression
+#else
+	import FoundationXML
+	import GNUSource
+	import getopt
+	import lzma
+	import zlib
+#endif
 
 #if PROFILING
 	import os
@@ -19,6 +28,41 @@ extension RandomAccessCollection {
 	subscript(fromOffset fromOffset: Int = 0, size size: Int) -> SubSequence {
 		let base = index(startIndex, offsetBy: fromOffset)
 		return self[base..<index(base, offsetBy: size)]
+	}
+}
+
+enum DefaultCompressor {
+	static func zlibDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
+		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
+			#if os(macOS)
+				let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
+				data[fromOffset: zlibSkip].withUnsafeBufferPointer {
+					precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, $0.baseAddress!, $0.count, nil, COMPRESSION_ZLIB) == decompressedSize)
+				}
+			#else
+				var size = decompressedSize
+				precondition(uncompress(buffer.baseAddress!, &size, data, UInt(data.count)) == Z_OK)
+				precondition(size == decompressedSize)
+			#endif
+			count = decompressedSize
+		}
+	}
+
+	static func lzmaDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
+		let magic = [0xfd] + "7zX".utf8
+		precondition(data.prefix(magic.count).elementsEqual(magic))
+		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
+			#if os(macOS)
+				precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, data, data.count, nil, COMPRESSION_LZMA) == decompressedSize)
+			#else
+				var memlimit = UInt64.max
+				var inIndex = 0
+				var outIndex = 0
+				precondition(lzma_stream_buffer_decode(&memlimit, 0, nil, data, &inIndex, data.count, buffer.baseAddress, &outIndex, decompressedSize) == LZMA_OK)
+				precondition(inIndex == data.count && outIndex == decompressedSize)
+			#endif
+			count = decompressedSize
+		}
 	}
 }
 
@@ -418,12 +462,7 @@ struct Chunk: Sendable {
 
 	init(data: [UInt8], decompressedSize: Int?) {
 		if let decompressedSize = decompressedSize {
-			let magic = [0xfd] + "7zX".utf8
-			precondition(data.prefix(magic.count).elementsEqual(magic))
-			buffer = [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
-				precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, data, data.count, nil, COMPRESSION_LZMA) == decompressedSize)
-				count = decompressedSize
-			}
+			buffer = DefaultCompressor.lzmaDecompress(data: data, decompressedSize: decompressedSize)
 		} else {
 			buffer = data
 		}
@@ -446,142 +485,144 @@ struct File {
 		Identifier(dev: dev, ino: ino)
 	}
 
-	func compressedData() async -> [UInt8]? {
-		let blockSize = 64 << 10  // LZFSE with 64K block size
-		var _data = [UInt8]()
-		_data.reserveCapacity(self.data.map(\.count).reduce(0, +))
-		let data = self.data.reduce(into: _data, +=)
-		let compressionStream = ConcurrentStream<[UInt8]?>()
+	#if os(macOS)
+		func compressedData() async -> [UInt8]? {
+			let blockSize = 64 << 10  // LZFSE with 64K block size
+			var _data = [UInt8]()
+			_data.reserveCapacity(self.data.map(\.count).reduce(0, +))
+			let data = self.data.reduce(into: _data, +=)
+			let compressionStream = ConcurrentStream<[UInt8]?>()
 
-		#if PROFILING
-			let id = OSSignpostID(log: compressionLog)
-			os_signpost(.begin, log: compressionLog, name: "Data compression", signpostID: id, "Starting compression of %s (uncompressed size = %td)", name, data.count)
-		#endif
-		
-		Task {
-		var position = data.startIndex
+			#if PROFILING
+				let id = OSSignpostID(log: compressionLog)
+				os_signpost(.begin, log: compressionLog, name: "Data compression", signpostID: id, "Starting compression of %s (uncompressed size = %td)", name, data.count)
+			#endif
 
-		while position < data.endIndex {
-				let _position = position
-				await compressionStream.addTask {
-					try Task.checkCancellation()
-					let position = _position
-			let end = min(position + blockSize, data.endIndex)
-			let data = [UInt8](unsafeUninitializedCapacity: (end - position) + (end - position) / 16) { buffer, count in
-				data[position..<end].withUnsafeBufferPointer { data in
-					count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
-					guard count < buffer.count else {
-						count = 0
-						return
+			Task {
+				var position = data.startIndex
+
+				while position < data.endIndex {
+					let _position = position
+					await compressionStream.addTask {
+						try Task.checkCancellation()
+						let position = _position
+						let end = min(position + blockSize, data.endIndex)
+						let data = [UInt8](unsafeUninitializedCapacity: (end - position) + (end - position) / 16) { buffer, count in
+							data[position..<end].withUnsafeBufferPointer { data in
+								count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
+								guard count < buffer.count else {
+									count = 0
+									return
+								}
+							}
+						}
+						return !data.isEmpty ? data : nil
+					}
+					position += blockSize
+				}
+
+				await compressionStream.finish()
+			}
+			var chunks = [[UInt8]]()
+			do {
+				for try await chunk in compressionStream.results {
+					if let chunk = chunk {
+						chunks.append(chunk)
+					} else {
+						#if PROFILING
+							os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (did not compress)")
+						#endif
+						return nil
 					}
 				}
-			}
-					return !data.isEmpty ? data : nil
-				}
-				position += blockSize
+			} catch {
+				fatalError()
 			}
 
-			await compressionStream.finish()
-		}
-		var chunks = [[UInt8]]()
-		do {
-			for try await chunk in compressionStream.results {
-				if let chunk = chunk {
-					chunks.append(chunk)
-				} else {
-					#if PROFILING
-						os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (did not compress)")
-					#endif
+			let tableSize = (chunks.count + 1) * MemoryLayout<UInt32>.size
+			let size = tableSize + chunks.map(\.count).reduce(0, +)
+
+			#if PROFILING
+				defer {
+					os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (compressed size = %td)", size)
+				}
+			#endif
+
+			guard size < data.count else {
 				return nil
 			}
-			}
-		} catch {
-			fatalError()
-		}
 
-		let tableSize = (chunks.count + 1) * MemoryLayout<UInt32>.size
-		let size = tableSize + chunks.map(\.count).reduce(0, +)
+			return [UInt8](unsafeUninitializedCapacity: size) { buffer, count in
+				var position = tableSize
 
-		#if PROFILING
-			defer {
-				os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (compressed size = %td)", size)
-			}
-		#endif
-
-		guard size < data.count else {
-			return nil
-		}
-
-		return [UInt8](unsafeUninitializedCapacity: size) { buffer, count in
-			var position = tableSize
-
-			func writePosition(toTableIndex index: Int) {
-				precondition(position < UInt32.max)
-				for i in 0..<MemoryLayout<UInt32>.size {
-					buffer[index * MemoryLayout<UInt32>.size + i] = UInt8(position >> (i * 8) & 0xff)
+				func writePosition(toTableIndex index: Int) {
+					precondition(position < UInt32.max)
+					for i in 0..<MemoryLayout<UInt32>.size {
+						buffer[index * MemoryLayout<UInt32>.size + i] = UInt8(position >> (i * 8) & 0xff)
+					}
 				}
+
+				writePosition(toTableIndex: 0)
+				for (index, chunk) in zip(1..., chunks) {
+					_ = UnsafeMutableBufferPointer(rebasing: buffer.suffix(from: position)).initialize(from: chunk)
+					position += chunk.count
+					writePosition(toTableIndex: index)
+				}
+				count = size
 			}
-
-			writePosition(toTableIndex: 0)
-			for (index, chunk) in zip(1..., chunks) {
-				_ = UnsafeMutableBufferPointer(rebasing: buffer.suffix(from: position)).initialize(from: chunk)
-				position += chunk.count
-				writePosition(toTableIndex: index)
-			}
-			count = size
-		}
-	}
-
-	func write(compressedData data: [UInt8], toDescriptor descriptor: CInt) -> Bool {
-		let uncompressedSize = self.data.map(\.count).reduce(0, +)
-		let attribute =
-			"cmpf".utf8.reversed()  // magic
-			+ [0x0c, 0x00, 0x00, 0x00]  // LZFSE, 64K chunks
-			+ ([
-				(uncompressedSize >> 0) & 0xff,
-				(uncompressedSize >> 8) & 0xff,
-				(uncompressedSize >> 16) & 0xff,
-				(uncompressedSize >> 24) & 0xff,
-				(uncompressedSize >> 32) & 0xff,
-				(uncompressedSize >> 40) & 0xff,
-				(uncompressedSize >> 48) & 0xff,
-				(uncompressedSize >> 56) & 0xff,
-			].map(UInt8.init) as [UInt8])
-
-		guard fsetxattr(descriptor, "com.apple.decmpfs", attribute, attribute.count, 0, XATTR_SHOWCOMPRESSION) == 0 else {
-			return false
 		}
 
-		let resourceForkDescriptor = open(name + _PATH_RSRCFORKSPEC, O_WRONLY | O_CREAT, 0o666)
-		guard resourceForkDescriptor >= 0 else {
-			return false
-		}
-		defer {
-			close(resourceForkDescriptor)
-		}
+		func write(compressedData data: [UInt8], toDescriptor descriptor: CInt) -> Bool {
+			let uncompressedSize = self.data.map(\.count).reduce(0, +)
+			let attribute =
+				"cmpf".utf8.reversed()  // magic
+				+ [0x0c, 0x00, 0x00, 0x00]  // LZFSE, 64K chunks
+				+ ([
+					(uncompressedSize >> 0) & 0xff,
+					(uncompressedSize >> 8) & 0xff,
+					(uncompressedSize >> 16) & 0xff,
+					(uncompressedSize >> 24) & 0xff,
+					(uncompressedSize >> 32) & 0xff,
+					(uncompressedSize >> 40) & 0xff,
+					(uncompressedSize >> 48) & 0xff,
+					(uncompressedSize >> 56) & 0xff,
+				].map(UInt8.init) as [UInt8])
 
-		var written: Int
-		repeat {
-			#if PROFILING
-				let id = OSSignpostID(log: filesystemLog)
-				os_signpost(.begin, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Starting compressed pwrite for %s", name)
-			#endif
-			// TODO: handle partial writes smarter
-			written = pwrite(resourceForkDescriptor, data, data.count, 0)
-			guard written >= 0 else {
+			guard fsetxattr(descriptor, "com.apple.decmpfs", attribute, attribute.count, 0, XATTR_SHOWCOMPRESSION) == 0 else {
 				return false
 			}
-			#if PROFILING
-				os_signpost(.end, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Ended")
-			#endif
-		} while written != data.count
 
-		guard fchflags(descriptor, UInt32(UF_COMPRESSED)) == 0 else {
-			return false
+			let resourceForkDescriptor = open(name + _PATH_RSRCFORKSPEC, O_WRONLY | O_CREAT, 0o666)
+			guard resourceForkDescriptor >= 0 else {
+				return false
+			}
+			defer {
+				close(resourceForkDescriptor)
+			}
+
+			var written: Int
+			repeat {
+				#if PROFILING
+					let id = OSSignpostID(log: filesystemLog)
+					os_signpost(.begin, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Starting compressed pwrite for %s", name)
+				#endif
+				// TODO: handle partial writes smarter
+				written = pwrite(resourceForkDescriptor, data, data.count, 0)
+				guard written >= 0 else {
+					return false
+				}
+				#if PROFILING
+					os_signpost(.end, log: filesystemLog, name: "compressed pwrite", signpostID: id, "Ended")
+				#endif
+			} while written != data.count
+
+			guard fchflags(descriptor, UInt32(UF_COMPRESSED)) == 0 else {
+				return false
+			}
+
+			return true
 		}
-
-		return true
-	}
+	#endif
 }
 
 extension option {
@@ -690,6 +731,12 @@ struct Main {
 		let stream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: [UInt8].self)
 		let io = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .main) { _ in
 		}
+		#if os(macOS)
+			let readSize = Int(PIPE_SIZE) * 16
+		#else
+			let pipeSize = fcntl(descriptor, F_GETPIPE_SZ)
+			let readSize = (pipeSize > 0 ? Int(pipeSize) : sysconf(CInt(_SC_PAGESIZE))) * 16
+		#endif
 
 		Task {
 			while await withCheckedContinuation({ continuation in
@@ -698,7 +745,7 @@ struct Main {
 					os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
 				#endif
 				var chunk = DispatchData.empty
-				io.read(offset: 0, length: Int(PIPE_SIZE * 16), queue: .main) { done, data, error in
+				io.read(offset: 0, length: readSize, queue: .main) { done, data, error in
 					guard error == 0 else {
 						stream.finish(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(error)))
 						continuation.resume(returning: false)
@@ -937,7 +984,7 @@ struct Main {
 						}
 
 						measureFilesystemOperation(named: "symlink") {
-							warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8), file.name), "symlinking")
+							warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, file.name), "symlinking")
 						}
 						setStickyBit(on: file)
 					}
@@ -963,12 +1010,14 @@ struct Main {
 						await taskStream.addTask {
 							try await task?.value
 
-							let compressedData =
-								options.compress
-								? try! await compressionStream.addTask {
-									await file.compressedData()
-								}.result.get() : nil
-							
+							#if os(macOS)
+								let compressedData =
+									options.compress
+									? try! await compressionStream.addTask {
+										await file.compressedData()
+									}.result.get() : nil
+							#endif
+
 							guard !options.dryRun else {
 								return
 							}
@@ -987,11 +1036,13 @@ struct Main {
 								setStickyBit(on: file)
 							}
 
-							if let compressedData = compressedData,
-								file.write(compressedData: compressedData, toDescriptor: fd)
-							{
-								return
-							}
+							#if os(macOS)
+								if let compressedData = compressedData,
+									file.write(compressedData: compressedData, toDescriptor: fd)
+								{
+									return
+								}
+							#endif
 
 							var position = 0
 							outer: for data in file.data {
@@ -1037,17 +1088,11 @@ struct Main {
 
 		_ = try await file.read(fileStart + Int(headerSize) - file.position)
 
-		let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
-		_ = try await file.read(2)
-		var compressedTOC = try await file.read(Int(tocCompressedSize) - zlibSkip)
-
-		let toc = [UInt8](unsafeUninitializedCapacity: Int(tocDecompressedSize)) { buffer, count in
-			count = compression_decode_buffer(buffer.baseAddress!, Int(tocDecompressedSize), &compressedTOC, compressedTOC.count, nil, COMPRESSION_ZLIB)
-			precondition(count == Int(tocDecompressedSize))
-		}
+		let compressedTOC = try await file.read(Int(tocCompressedSize))
+		let toc = DefaultCompressor.zlibDecompress(data: compressedTOC, decompressedSize: Int(tocDecompressedSize))
 
 		let document = try! XMLDocument(data: Data(toc))
-		let content = try! document.nodes(forXPath: "xar/toc/file").first {
+		let content = try! document.nodes(forXPath: "/xar/toc/file").first {
 			try! $0.nodes(forXPath: "name").first!.stringValue! == "Content"
 		}!
 		let contentOffset = Int(try! content.nodes(forXPath: "data/offset").first!.stringValue!)!
