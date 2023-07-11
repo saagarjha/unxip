@@ -457,25 +457,25 @@ struct File {
 			let id = OSSignpostID(log: compressionLog)
 			os_signpost(.begin, log: compressionLog, name: "Data compression", signpostID: id, "Starting compression of %s (uncompressed size = %td)", name, data.count)
 		#endif
-
+		
 		Task {
-			var position = data.startIndex
+		var position = data.startIndex
 
-			while position < data.endIndex {
+		while position < data.endIndex {
 				let _position = position
 				await compressionStream.addTask {
 					try Task.checkCancellation()
 					let position = _position
-					let end = min(position + blockSize, data.endIndex)
-					let data = [UInt8](unsafeUninitializedCapacity: (end - position) + (end - position) / 16) { buffer, count in
-						data[position..<end].withUnsafeBufferPointer { data in
-							count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
-							guard count < buffer.count else {
-								count = 0
-								return
-							}
-						}
+			let end = min(position + blockSize, data.endIndex)
+			let data = [UInt8](unsafeUninitializedCapacity: (end - position) + (end - position) / 16) { buffer, count in
+				data[position..<end].withUnsafeBufferPointer { data in
+					count = compression_encode_buffer(buffer.baseAddress!, buffer.count, data.baseAddress!, data.count, nil, COMPRESSION_LZFSE)
+					guard count < buffer.count else {
+						count = 0
+						return
 					}
+				}
+			}
 					return !data.isEmpty ? data : nil
 				}
 				position += blockSize
@@ -492,8 +492,8 @@ struct File {
 					#if PROFILING
 						os_signpost(.end, log: compressionLog, name: "Data compression", signpostID: id, "Ended compression (did not compress)")
 					#endif
-					return nil
-				}
+				return nil
+			}
 			}
 		} catch {
 			fatalError()
@@ -781,6 +781,9 @@ struct Main {
 				}
 				chunkNumber += 1
 			} while decompressedSize == chunkSize
+
+			_ = await previousYield?.result
+			chunkStream.finish()
 			await decompressionStream.finish()
 		}
 
@@ -965,7 +968,7 @@ struct Main {
 								? try! await compressionStream.addTask {
 									await file.compressedData()
 								}.result.get() : nil
-
+							
 							guard !options.dryRun else {
 								return
 							}
