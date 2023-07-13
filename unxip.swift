@@ -644,7 +644,7 @@ struct Options {
 		("n", "dry-run", "Dry run. (Often useful with -v.)"),
 		("v", "verbose", "Print xip file contents."),
 	]
-	static let version = "2.1"
+	static let version = "2.2"
 
 	var input: String?
 	var output: String?
