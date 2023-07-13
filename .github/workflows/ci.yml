@@ -16,31 +16,43 @@ on:
 
 jobs:
   test:
+    strategy:
+      matrix:
+        os: [macos-13, ubuntu-22.04]
     name: Test
-    runs-on: macos-12
+    runs-on: ${{ matrix.os }}
     environment: ci
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - name: System Info
+        run: uname -a
+
+      - name: Install Swift
+        if: ${{ !startsWith( matrix.os, 'macos' ) }}
+        run: eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" && brew install swift
+
       - name: Download Xcode
-        run: wget http://server.saagarjha.com/Xcode_14.0.1.xip.encrypted
+        run: wget http://server.saagarjha.com/Xcode_15_beta.xip.encrypted
 
         # I don't hate you, I just don't want to get sued
       - name: Decrypt Xcode
         env:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
-        run: openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_14.0.1.xip.encrypted > Xcode_14.0.1.xip
+        run: openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_15_beta.xip.encrypted > Xcode_15_beta.xip
 
       - name: Build unxip
         run: swift build --configuration release
 
       - name: Run unxip
-        run: .build/release/unxip Xcode_14.0.1.xip
+        run: .build/release/unxip Xcode_15_beta.xip
 
         # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
         # finds problems. The Xcode bundle has a ruby symlink that is recursive,
         # which trips this. So don't rely on the status, but instead use the
-        # output exclusively.
+        # output exclusively. Note that this means we need to test for existence
+        # ourselves!
       - name: Validate Xcode
-        run: diff -r Xcode.app /Applications/Xcode_14.0.1.app > diff || true; cat diff && ! test -s diff
+        if: ${{ startsWith( matrix.os, 'macos' ) }}
+        run: diff -r Xcode-beta.app /Applications/Xcode_15.0.app > diff || true; cat diff && ! test -s diff && test -d /Applications/Xcode_15.0.app
