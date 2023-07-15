@@ -66,22 +66,42 @@ enum DefaultCompressor {
 	}
 }
 
-struct Condition {
-	var stream: AsyncStream<Void>!
-	var continuation: AsyncStream<Void>.Continuation!
+actor Condition {
+	enum State {
+		case indeterminate
+		case waiting(CheckedContinuation<Void, Never>)
+		case signaled
+	}
+	var state = State.indeterminate
 
-	init() {
-		stream = .init {
-			continuation = $0
+	nonisolated func signal() {
+		Task {
+			await _signal()
 		}
 	}
 
-	func signal() {
-		continuation.finish()
+	func _signal() {
+		switch state {
+			case .signaled:
+				preconditionFailure("Condition has already been signaled")
+			case .waiting(let continuation):
+				continuation.resume()
+				fallthrough
+			case .indeterminate:
+				state = .signaled
+		}
 	}
 
 	func wait() async {
-		for await _ in stream {
+		switch state {
+			case .waiting(_):
+				preconditionFailure("Condition is already waiting")
+			case .indeterminate:
+				await withCheckedContinuation {
+					state = .waiting($0)
+				}
+			case .signaled:
+				break
 		}
 	}
 }
