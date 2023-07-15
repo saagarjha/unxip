@@ -486,10 +486,23 @@ struct File {
 	}
 
 	#if os(macOS)
+		static let blocksize = {
+			var buffer = stat()
+			// FIXME: This relies on a previous chdir to the output directory
+			stat(".", &buffer)
+			return buffer.st_blksize
+		}()
+
 		func compressedData() async -> [UInt8]? {
-			let blockSize = 64 << 10  // LZFSE with 64K block size
+			// There is no benefit on APFS to using transparent compression if
+			// the data is less than one allocation block.
+			let totalSize = self.data.map(\.count).reduce(0, +)
+			guard totalSize > Self.blocksize else {
+				return nil
+			}
+
 			var _data = [UInt8]()
-			_data.reserveCapacity(self.data.map(\.count).reduce(0, +))
+			_data.reserveCapacity(totalSize)
 			let data = self.data.reduce(into: _data, +=)
 			let compressionStream = ConcurrentStream<[UInt8]?>()
 
@@ -497,6 +510,8 @@ struct File {
 				let id = OSSignpostID(log: compressionLog)
 				os_signpost(.begin, log: compressionLog, name: "Data compression", signpostID: id, "Starting compression of %s (uncompressed size = %td)", name, data.count)
 			#endif
+
+			let blockSize = 64 << 10  // LZFSE with 64K block size
 
 			Task {
 				var position = data.startIndex
