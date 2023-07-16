@@ -333,7 +333,7 @@ actor ConcurrentStream<Element> {
 	var widthConditions = [Int: Condition]()
 	var orderingConditions = [Int: Condition]()
 
-	init(batchSize: Int = ProcessInfo.processInfo.activeProcessorCount, consumeResults: Bool = false) {
+	init(batchSize: Int = 2 * ProcessInfo.processInfo.activeProcessorCount, consumeResults: Bool = false) {
 		self.batchSize = batchSize
 		results = AsyncThrowingStream<Element, Error> {
 			continuation = $0
