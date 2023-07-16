@@ -41,9 +41,13 @@ The intended usage of unxip is with a single command line parameter that represe
 
 ```console
 $ unxip Xcode.xip # will produce Xcode.app in the current directory
+$ curl https://webserver/Xcode.xip | unxip - /Applications # Read from a stream and extract to /Applications
 ```
 
-As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem. **For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation.**
+As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem.
+
+> **Warning**  
+> For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation. Consider downloading XIPs only from sources you trust, such as directly from Apple.
 
 ## Contributing
 
