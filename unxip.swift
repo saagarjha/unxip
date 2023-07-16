@@ -479,12 +479,15 @@ struct DataStream<S: AsyncSequence> where S.Element: RandomAccessCollection, S.E
 
 struct Chunk: Sendable {
 	let buffer: [UInt8]
+	let decompressed: Bool
 
 	init(data: [UInt8], decompressedSize: Int?) {
 		if let decompressedSize = decompressedSize {
 			buffer = DefaultCompressor.lzmaDecompress(data: data, decompressedSize: decompressedSize)
+			decompressed = true
 		} else {
 			buffer = data
+			decompressed = false
 		}
 	}
 }
@@ -495,6 +498,7 @@ struct File {
 	let mode: Int
 	let name: String
 	var data = [ArraySlice<UInt8>]()
+	var looksIncompressible = false
 
 	struct Identifier: Hashable {
 		let dev: Int
@@ -514,6 +518,10 @@ struct File {
 		}()
 
 		func compressedData() async -> [UInt8]? {
+			guard !looksIncompressible else {
+				return nil
+			}
+
 			// There is no benefit on APFS to using transparent compression if
 			// the data is less than one allocation block.
 			let totalSize = self.data.map(\.count).reduce(0, +)
@@ -919,7 +927,17 @@ struct Main {
 						position = 0
 					}
 					let size = min(filesize, chunk.buffer.endIndex - position)
-					file.data.append(chunk.buffer[fromOffset: position, size: size])
+					let buffer = chunk.buffer[fromOffset: position, size: size]
+					file.data.append(buffer)
+
+					// This file appears to have a full raw chunk in it. This
+					// means it's large and has substantial portions that are
+					// incompressible. We probably should skip trying to do so
+					// ourselves.
+					if buffer.count == chunk.buffer.count, !chunk.decompressed {
+						file.looksIncompressible = true
+					}
+
 					filesize -= size
 					position += size
 				}
