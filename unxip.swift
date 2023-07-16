@@ -509,6 +509,31 @@ struct File {
 		Identifier(dev: dev, ino: ino)
 	}
 
+	enum `Type` {
+		case regular
+		case directory
+		case symlink
+	}
+
+	var type: Type {
+		// The types we care about, anyways
+		let typeMask = C_ISLNK | C_ISDIR | C_ISREG
+		switch CInt(mode) & typeMask {
+			case C_ISLNK:
+				return .symlink
+			case C_ISDIR:
+				return .directory
+			case C_ISREG:
+				return .regular
+			default:
+				fatalError("\(name) with \(mode) is a type that is unhandled")
+		}
+	}
+
+	var sticky: Bool {
+		mode & Int(C_ISVTX) != 0
+	}
+
 	#if os(macOS)
 		static let blocksize = {
 			var buffer = stat()
@@ -668,6 +693,98 @@ struct File {
 	#endif
 }
 
+actor Statistics {
+	static let byteCountFormatter: ByteCountFormatter = {
+		let byteCountFormatter = ByteCountFormatter()
+		byteCountFormatter.allowsNonnumericFormatting = false
+		return byteCountFormatter
+	}()
+
+	// There seems to be a compiler bug where this needs to be outside of init
+	static func start() -> Any? {
+		if #available(macOS 13.0, *) {
+			return ContinuousClock.now
+		} else {
+			return nil
+		}
+	}
+
+	var start: Any?
+	var files = 0
+	var directories = 0
+	var symlinks = 0
+	var hardlinks = 0
+	var read = 0
+	var total: Int?
+
+	let source: DispatchSourceSignal
+
+	init() {
+		start = Self.start()
+
+		let watchedSignal: CInt
+		#if os(macOS)
+			watchedSignal = SIGINFO
+		#else
+			watchedSignal = SIGUSR1
+			signal(watchedSignal, SIG_IGN)
+		#endif
+
+		let source = DispatchSource.makeSignalSource(signal: watchedSignal)
+		self.source = source
+		source.setEventHandler {
+			Task {
+				await self.printStatistics()
+			}
+		}
+		source.resume()
+
+	}
+
+	func note(_ file: File) {
+		switch file.type {
+			case .regular:
+				files += 1
+			case .directory:
+				directories += 1
+			case .symlink:
+				symlinks += 1
+		}
+	}
+
+	func noteHardlink() {
+		hardlinks += 1
+	}
+
+	func noteRead(size bytes: Int) {
+		read += bytes
+	}
+
+	func setTotal(_ total: Int) {
+		self.total = total
+	}
+
+	func printStatistics() {
+		print("Read \(Self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
+		if let total = total {
+			print(" (out of \(Self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
+		}
+		if #available(macOS 13.0, *),
+			let start = start as? ContinuousClock.Instant
+		{
+			#if os(macOS)
+				let duration = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 2)))
+			#else
+				let duration = ContinuousClock.now - start
+			#endif
+			print(" in \(duration)")
+		} else {
+			print()
+		}
+		print("Created \(files) files, \(directories) directories, \(symlinks) symlinks, and \(hardlinks) hardlinks")
+	}
+}
+
 extension option {
 	init(name: StaticString, has_arg: CInt, flag: UnsafeMutablePointer<CInt>?, val: StringLiteralType) {
 		let _option = name.withUTF8Buffer {
@@ -685,15 +802,17 @@ struct Options {
 		("c", "compression-disable", "Disable APFS compression of result."),
 		("h", "help", "Print this help message."),
 		("n", "dry-run", "Dry run. (Often useful with -v.)"),
+		("s", "statistics", "Print statistics on completion."),
 		("v", "verbose", "Print xip file contents."),
 	]
 	static let version = "2.2"
 
 	var input: String?
 	var output: String?
-	var compress: Bool = true
-	var dryRun: Bool = false
-	var verbose: Bool = false
+	var compress = true
+	var dryRun = false
+	var printStatistics = false
+	var verbose = false
 
 	init() {
 		let options =
@@ -706,14 +825,16 @@ struct Options {
 				break
 			}
 			switch UnicodeScalar(UInt32(result)) {
+				case "V":
+					Self.printVersion()
 				case "c":
 					compress = false
 				case "n":
 					dryRun = true
 				case "h":
 					Self.printUsage(nominally: true)
-				case "V":
-					Self.printVersion()
+				case "s":
+					printStatistics = true
 				case "v":
 					verbose = true
 				default:
@@ -764,6 +885,7 @@ struct Options {
 @main
 struct Main {
 	static let options = Options()
+	static let statistics = Statistics()
 
 	static func async_precondition(_ condition: @autoclosure () async throws -> Bool) async rethrows {
 		let result = try await condition()
@@ -820,6 +942,7 @@ struct Main {
 										count = chunk.count
 									})
 								continuation.resume(returning: true)
+								await statistics.noteRead(size: chunk.count)
 							}
 						}
 					}
@@ -992,7 +1115,7 @@ struct Main {
 
 			@Sendable
 			func setStickyBit(on file: File) {
-				if file.mode & Int(C_ISVTX) != 0 {
+				if file.sticky {
 					measureFilesystemOperation(named: "chmod") {
 						warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
 					}
@@ -1021,13 +1144,12 @@ struct Main {
 						warn(link(original, file.name), "linking")
 					}
 				}
+				await statistics.noteHardlink()
 				continue
 			}
 
-			// The types we care about, anyways
-			let typeMask = Int(C_ISLNK | C_ISDIR | C_ISREG)
-			switch CInt(file.mode & typeMask) {
-				case C_ISLNK:
+			switch file.type {
+				case .symlink:
 					let task = parentDirectoryTask(for: file)
 					assert(task != nil, file.name)
 					await taskStream.addTask {
@@ -1041,7 +1163,7 @@ struct Main {
 						}
 						setStickyBit(on: file)
 					}
-				case C_ISDIR:
+				case .directory:
 					let task = parentDirectoryTask(for: file)
 					assert(task != nil || parentDirectory(of: file.name) == ".", file.name)
 					directories[file.name[...]] = await taskStream.addTask {
@@ -1055,7 +1177,7 @@ struct Main {
 						}
 						setStickyBit(on: file)
 					}
-				case C_ISREG:
+				case .regular:
 					let task = parentDirectoryTask(for: file)
 					assert(task != nil, file.name)
 					hardlinks[file.identifier] = (
@@ -1116,9 +1238,9 @@ struct Main {
 							}
 						}
 					)
-				default:
-					fatalError("\(file.name) with \(file.mode) is a type that is unhandled")
 			}
+
+			await statistics.note(file)
 		}
 
 		await taskStream.finish()
@@ -1156,10 +1278,15 @@ struct Main {
 	}
 
 	static func main() async throws {
-		let handle =
-			try options.input.flatMap {
-				try FileHandle(forReadingFrom: URL(fileURLWithPath: $0))
-			} ?? FileHandle.standardInput
+		let handle: FileHandle
+		if let input = options.input {
+			handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: input))
+			try handle.seekToEnd()
+			await statistics.setTotal(Int(try handle.offset()))
+			try handle.seek(toOffset: 0)
+		} else {
+			handle = FileHandle.standardInput
+		}
 
 		if let output = options.output {
 			guard chdir(output) == 0 else {
@@ -1171,5 +1298,9 @@ struct Main {
 		var file = dataStream(descriptor: handle.fileDescriptor)
 		try await locateContent(in: &file)
 		try await parseContent(file)
+
+		if options.printStatistics {
+			await statistics.printStatistics()
+		}
 	}
 }
