@@ -46,7 +46,7 @@ jobs:
         run: swift build --configuration release
 
       - name: Run unxip
-        run: .build/release/unxip Xcode_15_beta.xip
+        run: .build/release/unxip -s Xcode_15_beta.xip | grep -q 'Created 74201 files, 19130 directories, 7699 symlinks, and 16601 hardlinks'
 
         # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
         # finds problems. The Xcode bundle has a ruby symlink that is recursive,
