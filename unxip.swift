@@ -19,24 +19,12 @@ import Foundation
 	let filesystemLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.filesystem", category: "Filesystem") : .disabled
 #endif
 
-extension RandomAccessCollection {
-	subscript(fromOffset fromOffset: Int = 0, toOffset toOffset: Int? = nil) -> SubSequence {
-		let toOffset = toOffset ?? count
-		return self[index(startIndex, offsetBy: fromOffset)..<index(startIndex, offsetBy: toOffset)]
-	}
-
-	subscript(fromOffset fromOffset: Int = 0, size size: Int) -> SubSequence {
-		let base = index(startIndex, offsetBy: fromOffset)
-		return self[base..<index(base, offsetBy: size)]
-	}
-}
-
 enum DefaultCompressor {
 	static func zlibDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
 		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
 			#if os(macOS)
 				let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
-				data[fromOffset: zlibSkip].withUnsafeBufferPointer {
+				data[data.index(data.startIndex, offsetBy: zlibSkip)...].withUnsafeBufferPointer {
 					precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, $0.baseAddress!, $0.count, nil, COMPRESSION_ZLIB) == decompressedSize)
 				}
 			#else
@@ -1008,7 +996,7 @@ struct Main {
 		Task {
 			var iterator = chunkStream.makeAsyncIterator()
 			var chunk = try! await iterator.next()!
-			var position = 0
+			var position = chunk.buffer.startIndex
 
 			func read(size: Int) async -> [UInt8] {
 				var result = [UInt8]()
@@ -1047,10 +1035,10 @@ struct Main {
 				while filesize > 0 {
 					if position >= chunk.buffer.endIndex {
 						chunk = try! await iterator.next()!
-						position = 0
+						position = chunk.buffer.startIndex
 					}
-					let size = min(filesize, chunk.buffer.endIndex - position)
-					let buffer = chunk.buffer[fromOffset: position, size: size]
+					let end = chunk.buffer.index(position, offsetBy: filesize, limitedBy: chunk.buffer.endIndex) ?? chunk.buffer.endIndex
+					let buffer = chunk.buffer[position..<end]
 					file.data.append(buffer)
 
 					// This file appears to have a full raw chunk in it. This
@@ -1061,8 +1049,8 @@ struct Main {
 						file.looksIncompressible = true
 					}
 
-					filesize -= size
-					position += size
+					filesize -= end - position
+					position = end
 				}
 
 				guard file.name != "TRAILER!!!" else {
