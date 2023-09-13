@@ -1,6 +1,6 @@
 import Foundation
 
-#if os(macOS)
+#if canImport(Compression)
 	import Compression
 #else
 	import FoundationXML
@@ -8,6 +8,10 @@ import Foundation
 	import getopt
 	import lzma
 	import zlib
+#endif
+
+#if canImport(UIKit) // Embedded, in other words
+import libxml2
 #endif
 
 #if PROFILING
@@ -22,7 +26,7 @@ import Foundation
 enum DefaultCompressor {
 	static func zlibDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
 		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
-			#if os(macOS)
+			#if canImport(Compression)
 				let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
 				data[data.index(data.startIndex, offsetBy: zlibSkip)...].withUnsafeBufferPointer {
 					precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, $0.baseAddress!, $0.count, nil, COMPRESSION_ZLIB) == decompressedSize)
@@ -40,7 +44,7 @@ enum DefaultCompressor {
 		let magic = [0xfd] + "7zX".utf8
 		precondition(data.prefix(magic.count).elementsEqual(magic))
 		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
-			#if os(macOS)
+			#if canImport(Compression)
 				precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, data, data.count, nil, COMPRESSION_LZMA) == decompressedSize)
 			#else
 				var memlimit = UInt64.max
@@ -522,7 +526,7 @@ struct File {
 		mode & Int(C_ISVTX) != 0
 	}
 
-	#if os(macOS)
+	#if canImport(Darwin)
 		static let blocksize = {
 			var buffer = stat()
 			// FIXME: This relies on a previous chdir to the output directory
@@ -690,7 +694,7 @@ actor Statistics {
 
 	// There seems to be a compiler bug where this needs to be outside of init
 	static func start() -> Any? {
-		if #available(macOS 13.0, *) {
+		if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *) {
 			return ContinuousClock.now
 		} else {
 			return nil
@@ -711,7 +715,7 @@ actor Statistics {
 		start = Self.start()
 
 		let watchedSignal: CInt
-		#if os(macOS)
+		#if canImport(Darwin)
 			watchedSignal = SIGINFO
 		#else
 			watchedSignal = SIGUSR1
@@ -757,10 +761,10 @@ actor Statistics {
 		if let total = total {
 			print(" (out of \(Self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
 		}
-		if #available(macOS 13.0, *),
+		if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *),
 			let start = start as? ContinuousClock.Instant
 		{
-			#if os(macOS)
+			#if canImport(Darwin)
 				let duration = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 2)))
 			#else
 				let duration = ContinuousClock.now - start
@@ -886,9 +890,11 @@ struct Main {
 		}
 		#if os(macOS)
 			let readSize = Int(PIPE_SIZE) * 16
-		#else
+		#elseif canImport(Glibc)
 			let pipeSize = fcntl(descriptor, F_GETPIPE_SZ)
 			let readSize = (pipeSize > 0 ? Int(pipeSize) : sysconf(CInt(_SC_PAGESIZE))) * 16
+		#else
+			let readSize = sysconf(CInt(_SC_PAGESIZE)) * 16
 		#endif
 
 		Task {
@@ -1173,7 +1179,7 @@ struct Main {
 						await taskStream.addTask {
 							try await task?.value
 
-							#if os(macOS)
+							#if canImport(Darwin)
 								let compressedData =
 									options.compress
 									? try! await compressionStream.addTask {
@@ -1199,7 +1205,7 @@ struct Main {
 								setStickyBit(on: file)
 							}
 
-							#if os(macOS)
+							#if canImport(Darwin)
 								if let compressedData = compressedData,
 									file.write(compressedData: compressedData, toDescriptor: fd)
 								{
@@ -1254,12 +1260,49 @@ struct Main {
 		let compressedTOC = try await file.read(Int(tocCompressedSize))
 		let toc = DefaultCompressor.zlibDecompress(data: compressedTOC, decompressedSize: Int(tocDecompressedSize))
 
-		let document = try! XMLDocument(data: Data(toc))
-		let content = try! document.nodes(forXPath: "/xar/toc/file").first {
-			try! $0.nodes(forXPath: "name").first!.stringValue! == "Content"
-		}!
-		let contentOffset = Int(try! content.nodes(forXPath: "data/offset").first!.stringValue!)!
-		let contentSize = Int(try! content.nodes(forXPath: "data/length").first!.stringValue!)!
+		#if canImport(UIKit)
+			let document = xmlReadMemory(toc, CInt(toc.count), "", nil, 0)
+			defer {
+				xmlFreeDoc(document)
+			}
+			let context = xmlXPathNewContext(document)
+			defer {
+				xmlXPathFreeContext(context)
+			}
+
+			func evaluateXPath(node: xmlNodePtr!, xpath: String) -> String {
+				let result = xmlXPathNodeEval(node, xpath, context)!
+				defer {
+					xmlXPathFreeObject(result)
+				}
+				precondition(result.pointee.type == XPATH_NODESET && result.pointee.nodesetval.pointee.nodeNr == 1)
+				let string = xmlNodeListGetString(document, result.pointee.nodesetval.pointee.nodeTab.pointee!.pointee.children, 1)!
+				defer {
+					xmlFree(string)
+				}
+				return String(cString: string)
+			}
+
+			let result = xmlXPathEvalExpression("/xar/toc/file", context)!
+			defer {
+				xmlXPathFreeObject(result)
+			}
+			precondition(result.pointee.type == XPATH_NODESET)
+			let content = result.pointee.nodesetval.pointee.nodeTab[
+				(0..<Int(result.pointee.nodesetval.pointee.nodeNr)).first {
+					evaluateXPath(node: result.pointee.nodesetval.pointee.nodeTab[$0], xpath: "name") == "Content"
+				}!]
+
+			let contentOffset = Int(evaluateXPath(node: content, xpath: "data/offset"))!
+			let contentSize = Int(evaluateXPath(node: content, xpath: "data/length"))!
+		#else
+			let document = try! XMLDocument(data: Data(toc))
+			let content = try! document.nodes(forXPath: "/xar/toc/file").first {
+				try! $0.nodes(forXPath: "name").first!.stringValue! == "Content"
+			}!
+			let contentOffset = Int(try! content.nodes(forXPath: "data/offset").first!.stringValue!)!
+			let contentSize = Int(try! content.nodes(forXPath: "data/length").first!.stringValue!)!
+		#endif
 
 		_ = try await file.read(fileStart + Int(headerSize) + Int(tocCompressedSize) + contentOffset - file.position)
 		file.cap = file.position + contentSize
