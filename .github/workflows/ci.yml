@@ -46,7 +46,11 @@ jobs:
         run: swift build --configuration release
 
       - name: Run unxip
-        run: .build/release/unxip -s Xcode_15_beta.xip | grep -q 'Created 74201 files, 19130 directories, 7699 symlinks, and 16601 hardlinks'
+        run: .build/release/unxip -s Xcode_15_beta.xip /tmp | grep -q 'Created 74201 files, 19130 directories, 7699 symlinks, and 16601 hardlinks'
+
+      - name: Run xip
+        if: ${{ startsWith( matrix.os, 'macos' ) }}
+        run: xip --expand Xcode_15_beta.xip
 
         # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
         # finds problems. The Xcode bundle has a ruby symlink that is recursive,
@@ -55,4 +59,4 @@ jobs:
         # ourselves!
       - name: Validate Xcode
         if: ${{ startsWith( matrix.os, 'macos' ) }}
-        run: diff -r Xcode-beta.app /Applications/Xcode_15.0.app > diff || true; cat diff && ! test -s diff && test -d /Applications/Xcode_15.0.app
+        run: diff -r /tmp/Xcode-beta.app Xcode-beta.app > diff || true; cat diff && ! test -s diff && test -d Xcode-beta.app
