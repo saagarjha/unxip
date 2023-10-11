@@ -975,11 +975,12 @@ struct Main {
 					let decompressedSize = _decompressedSize
 					let previousYield = _previousYield
 					let chunkNumber = _chunkNumber
+					let compressed = compressedSize != chunkSize
 					#if PROFILING
 						let id = OSSignpostID(log: decompressionLog)
-						os_signpost(.begin, log: decompressionLog, name: "Decompress", signpostID: id, "Starting %td (compressed size = %td)", chunkNumber, compressedSize)
+						os_signpost(.begin, log: decompressionLog, name: "Decompress", signpostID: id, compressed ? "Starting %td (compressed size = %td)" : "Starting %td (uncompressed size = %td)", chunkNumber, compressedSize)
 					#endif
-					let chunk = Chunk(data: block, decompressedSize: compressedSize == chunkSize ? nil : Int(decompressedSize))
+					let chunk = Chunk(data: block, decompressedSize: compressed ? Int(decompressedSize) : nil)
 					#if PROFILING
 						os_signpost(.end, log: decompressionLog, name: "Decompress", signpostID: id, "Ended %td (decompressed size = %td)", chunkNumber, decompressedSize)
 					#endif
