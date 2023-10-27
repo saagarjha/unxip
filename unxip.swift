@@ -10,9 +10,11 @@ import Foundation
 	import zlib
 #endif
 
-#if canImport(UIKit) // Embedded, in other words
-import libxml2
+#if canImport(UIKit)  // Embedded, in other words
+	import libxml2
 #endif
+
+// MARK: - Internal utilities
 
 #if PROFILING
 	import os
@@ -22,41 +24,6 @@ import libxml2
 	let compressionLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.compression", category: "Compression") : .disabled
 	let filesystemLog = { true }() ? OSLog(subsystem: "com.saagarjha.unxip.filesystem", category: "Filesystem") : .disabled
 #endif
-
-enum DefaultCompressor {
-	static func zlibDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
-		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
-			#if canImport(Compression)
-				let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
-				data[data.index(data.startIndex, offsetBy: zlibSkip)...].withUnsafeBufferPointer {
-					precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, $0.baseAddress!, $0.count, nil, COMPRESSION_ZLIB) == decompressedSize)
-				}
-			#else
-				var size = decompressedSize
-				precondition(uncompress(buffer.baseAddress!, &size, data, UInt(data.count)) == Z_OK)
-				precondition(size == decompressedSize)
-			#endif
-			count = decompressedSize
-		}
-	}
-
-	static func lzmaDecompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
-		let magic = [0xfd] + "7zX".utf8
-		precondition(data.prefix(magic.count).elementsEqual(magic))
-		return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
-			#if canImport(Compression)
-				precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, data, data.count, nil, COMPRESSION_LZMA) == decompressedSize)
-			#else
-				var memlimit = UInt64.max
-				var inIndex = 0
-				var outIndex = 0
-				precondition(lzma_stream_buffer_decode(&memlimit, 0, nil, data, &inIndex, data.count, buffer.baseAddress, &outIndex, decompressedSize) == LZMA_OK)
-				precondition(inIndex == data.count && outIndex == decompressedSize)
-			#endif
-			count = decompressedSize
-		}
-	}
-}
 
 actor Condition {
 	enum State {
@@ -142,6 +109,53 @@ struct Queue<Element> {
 		self.buffer = buffer
 		readIndex = 0
 		writeIndex = slice1.count + slice2.count
+	}
+}
+
+extension AsyncThrowingStream where Failure == Error {
+	actor PermissiveActionLink {
+		var iterator: Iterator
+		let count: Int
+		var queued = [CheckedContinuation<Element?, Error>]()
+
+		init(iterator: Iterator, count: Int) {
+			self.iterator = iterator
+			self.count = count
+		}
+
+		func next() async throws -> Element? {
+			try await withCheckedThrowingContinuation { continuation in
+				queued.append(continuation)
+
+				if queued.count == count {
+					Task {
+						await step()
+					}
+				}
+			}
+		}
+
+		func step() async {
+			var iterator = self.iterator
+			let next: Result<Element?, Error>
+			do {
+				next = .success(try await iterator.next())
+			} catch {
+				next = .failure(error)
+			}
+			self.iterator = iterator
+			for continuation in queued {
+				continuation.resume(with: next)
+			}
+			queued.removeAll()
+		}
+	}
+
+	init<S: AsyncSequence>(erasing sequence: S) where S.Element == Element {
+		var iterator = sequence.makeAsyncIterator()
+		self.init {
+			try await iterator.next()
+		}
 	}
 }
 
@@ -412,8 +426,21 @@ actor ConcurrentStream<Element> {
 	}
 }
 
-struct DataStream<S: AsyncSequence> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
-	var position: Int = 0 {
+extension option {
+	init(name: StaticString, has_arg: CInt, flag: UnsafeMutablePointer<CInt>?, val: StringLiteralType) {
+		let _option = name.withUTF8Buffer {
+			$0.withMemoryRebound(to: CChar.self) {
+				option(name: $0.baseAddress, has_arg: has_arg, flag: flag, val: CInt(UnicodeScalar(val)!.value))
+			}
+		}
+		self = _option
+	}
+}
+
+// MARK: - Public API
+
+public struct DataReader<S: AsyncSequence> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+	public var position: Int = 0 {
 		didSet {
 			if let cap = cap {
 				precondition(position <= cap)
@@ -423,9 +450,9 @@ struct DataStream<S: AsyncSequence> where S.Element: RandomAccessCollection, S.E
 	var current: (S.Element.Index, S.Element)?
 	var iterator: S.AsyncIterator
 
-	var cap: Int?
+	public var cap: Int?
 
-	init(data: S) {
+	public init(data: S) {
 		self.iterator = data.makeAsyncIterator()
 	}
 
@@ -469,13 +496,82 @@ struct DataStream<S: AsyncSequence> where S.Element: RandomAccessCollection, S.E
 	}
 }
 
-struct Chunk: Sendable {
-	let buffer: [UInt8]
-	let decompressed: Bool
+extension DataReader where S == AsyncThrowingStream<[UInt8], Error> {
+	public init(descriptor: CInt) {
+		self.init(data: Self.data(readingFrom: descriptor))
+	}
 
-	init(data: [UInt8], decompressedSize: Int?) {
+	public static func data(readingFrom descriptor: CInt) -> S {
+		let stream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: [UInt8].self)
+		let io = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .main) { _ in
+		}
+		#if os(macOS)
+			let readSize = Int(PIPE_SIZE) * 16
+		#elseif canImport(Glibc)
+			let pipeSize = fcntl(descriptor, F_GETPIPE_SZ)
+			let readSize = (pipeSize > 0 ? Int(pipeSize) : sysconf(CInt(_SC_PAGESIZE))) * 16
+		#else
+			let readSize = sysconf(CInt(_SC_PAGESIZE)) * 16
+		#endif
+
+		Task {
+			while await withCheckedContinuation({ continuation in
+				#if PROFILING
+					let id = OSSignpostID(log: readLog)
+					os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
+				#endif
+				var chunk = DispatchData.empty
+				io.read(offset: 0, length: readSize, queue: .main) { done, data, error in
+					guard error == 0 else {
+						stream.finish(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(error)))
+						continuation.resume(returning: false)
+						return
+					}
+
+					chunk.append(data!)
+
+					#if PROFILING
+						os_signpost(.event, log: readLog, name: "Read", signpostID: id, "Read %td bytes", data!.count)
+					#endif
+
+					if done {
+						if chunk.isEmpty {
+							#if PROFILING
+								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended final read")
+							#endif
+							stream.finish()
+							continuation.resume(returning: false)
+						} else {
+							#if PROFILING
+								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
+							#endif
+							let chunk = chunk
+							Task {
+								await stream.yield(
+									[UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
+										_ = chunk.copyBytes(to: buffer, from: nil)
+										count = chunk.count
+									})
+								continuation.resume(returning: true)
+							}
+						}
+					}
+				}
+			}) {
+			}
+		}
+
+		return .init(erasing: stream)
+	}
+}
+
+public struct Chunk: Sendable {
+	public let buffer: [UInt8]
+	public let decompressed: Bool
+
+	init(data: [UInt8], decompressedSize: Int?, lzmaDecompressor: ([UInt8], Int) -> [UInt8]) {
 		if let decompressedSize = decompressedSize {
-			buffer = DefaultCompressor.lzmaDecompress(data: data, decompressedSize: decompressedSize)
+			buffer = lzmaDecompressor(data, decompressedSize)
 			decompressed = true
 		} else {
 			buffer = data
@@ -484,12 +580,12 @@ struct Chunk: Sendable {
 	}
 }
 
-struct File {
-	let dev: Int
-	let ino: Int
-	let mode: Int
-	let name: String
-	var data = [ArraySlice<UInt8>]()
+public struct File {
+	public let dev: Int
+	public let ino: Int
+	public let mode: Int
+	public let name: String
+	public var data = [ArraySlice<UInt8>]()
 	var looksIncompressible = false
 
 	struct Identifier: Hashable {
@@ -501,13 +597,13 @@ struct File {
 		Identifier(dev: dev, ino: ino)
 	}
 
-	enum `Type` {
+	public enum `Type` {
 		case regular
 		case directory
 		case symlink
 	}
 
-	var type: Type {
+	public var type: Type {
 		// The types we care about, anyways
 		let typeMask = C_ISLNK | C_ISDIR | C_ISREG
 		switch CInt(mode) & typeMask {
@@ -522,7 +618,7 @@ struct File {
 		}
 	}
 
-	var sticky: Bool {
+	public var sticky: Bool {
 		mode & Int(C_ISVTX) != 0
 	}
 
@@ -685,277 +781,161 @@ struct File {
 	#endif
 }
 
-actor Statistics {
-	static let byteCountFormatter: ByteCountFormatter = {
-		let byteCountFormatter = ByteCountFormatter()
-		byteCountFormatter.allowsNonnumericFormatting = false
-		return byteCountFormatter
-	}()
+public protocol StreamAperture {
+	associatedtype Input
+	associatedtype Next: StreamAperture
+	associatedtype Options
 
-	// There seems to be a compiler bug where this needs to be outside of init
-	static func start() -> Any? {
-		if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *) {
-			return ContinuousClock.now
-		} else {
-			return nil
-		}
-	}
-
-	var start: Any?
-	var files = 0
-	var directories = 0
-	var symlinks = 0
-	var hardlinks = 0
-	var read = 0
-	var total: Int?
-
-	let source: DispatchSourceSignal
-
-	init() {
-		start = Self.start()
-
-		let watchedSignal: CInt
-		#if canImport(Darwin)
-			watchedSignal = SIGINFO
-		#else
-			watchedSignal = SIGUSR1
-			signal(watchedSignal, SIG_IGN)
-		#endif
-
-		let source = DispatchSource.makeSignalSource(signal: watchedSignal)
-		self.source = source
-		source.setEventHandler {
-			Task {
-				await self.printStatistics()
-			}
-		}
-		source.resume()
-
-	}
-
-	func note(_ file: File) {
-		switch file.type {
-			case .regular:
-				files += 1
-			case .directory:
-				directories += 1
-			case .symlink:
-				symlinks += 1
-		}
-	}
-
-	func noteHardlink() {
-		hardlinks += 1
-	}
-
-	func noteRead(size bytes: Int) {
-		read += bytes
-	}
-
-	func setTotal(_ total: Int) {
-		self.total = total
-	}
-
-	func printStatistics() {
-		print("Read \(Self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
-		if let total = total {
-			print(" (out of \(Self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
-		}
-		if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *),
-			let start = start as? ContinuousClock.Instant
-		{
-			#if canImport(Darwin)
-				let duration = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 2)))
-			#else
-				let duration = ContinuousClock.now - start
-			#endif
-			print(" in \(duration)")
-		} else {
-			print()
-		}
-		print("Created \(files) files, \(directories) directories, \(symlinks) symlinks, and \(hardlinks) hardlinks")
-	}
+	static func transform(_: Input, options: Options?) -> Next.Input
 }
 
-extension option {
-	init(name: StaticString, has_arg: CInt, flag: UnsafeMutablePointer<CInt>?, val: StringLiteralType) {
-		let _option = name.withUTF8Buffer {
-			$0.withMemoryRebound(to: CChar.self) {
-				option(name: $0.baseAddress, has_arg: has_arg, flag: flag, val: CInt(UnicodeScalar(val)!.value))
-			}
-		}
-		self = _option
-	}
-}
-
-struct Options {
-	static let options: [(flag: String, name: StaticString, description: StringLiteralType)] = [
-		("V", "version", "Print the unxip version number."),
-		("c", "compression-disable", "Disable APFS compression of result."),
-		("h", "help", "Print this help message."),
-		("n", "dry-run", "Dry run. (Often useful with -v.)"),
-		("s", "statistics", "Print statistics on completion."),
-		("v", "verbose", "Print xip file contents."),
-	]
-	static let version = "2.2"
-
-	var input: String?
-	var output: String?
-	var compress = true
-	var dryRun = false
-	var printStatistics = false
-	var verbose = false
-
-	init() {
-		let options =
-			Self.options.map {
-				option(name: $0.name, has_arg: no_argument, flag: nil, val: $0.flag)
-			} + [option(name: nil, has_arg: 0, flag: nil, val: 0)]
-		repeat {
-			let result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, Self.options.map(\.flag).reduce("", +), options, nil)
-			if result < 0 {
-				break
-			}
-			switch UnicodeScalar(UInt32(result)) {
-				case "V":
-					Self.printVersion()
-				case "c":
-					compress = false
-				case "n":
-					dryRun = true
-				case "h":
-					Self.printUsage(nominally: true)
-				case "s":
-					printStatistics = true
-				case "v":
-					verbose = true
-				default:
-					Self.printUsage(nominally: false)
-			}
-		} while true
-
-		let arguments = UnsafeBufferPointer(start: CommandLine.unsafeArgv + Int(optind), count: Int(CommandLine.argc - optind)).map {
-			String(cString: $0!)
-		}
-
-		guard let input = arguments.first else {
-			Self.printUsage(nominally: false)
-		}
-
-		self.input = input == "-" ? nil : input
-		self.output = arguments.dropFirst().first
-	}
-
-	static func printVersion() -> Never {
-		print("unxip \(version)")
-		exit(EXIT_SUCCESS)
-	}
-
-	static func printUsage(nominally: Bool) -> Never {
-		fputs(
-			"""
-			A fast Xcode unarchiver
-
-			USAGE: unxip [options] <input> [output]
-
-			OPTIONS:
-			
-			""", nominally ? stdout : stderr)
-
-		assert(options.map(\.flag) == options.map(\.flag).sorted())
-		let maxWidth = options.map(\.name.utf8CodeUnitCount).max()!
-		for option in options {
-			let line = "    -\(option.flag), --\(option.name.description.padding(toLength: maxWidth, withPad: " ", startingAt: 0))  \(option.description)\n"
-			assert(line.count <= 80)
-			fputs(line, nominally ? stdout : stderr)
-		}
-
-		exit(nominally ? EXIT_SUCCESS : EXIT_FAILURE)
-	}
-}
-
-@main
-struct Main {
-	static let options = Options()
-	static let statistics = Statistics()
-
+extension StreamAperture {
 	static func async_precondition(_ condition: @autoclosure () async throws -> Bool) async rethrows {
 		let result = try await condition()
 		precondition(result)
 	}
+}
 
-	static func dataStream(descriptor: CInt) -> DataStream<BackpressureStream<[UInt8], CountedBackpressure<[UInt8]>>> {
-		let stream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: [UInt8].self)
-		let io = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .main) { _ in
-		}
-		#if os(macOS)
-			let readSize = Int(PIPE_SIZE) * 16
-		#elseif canImport(Glibc)
-			let pipeSize = fcntl(descriptor, F_GETPIPE_SZ)
-			let readSize = (pipeSize > 0 ? Int(pipeSize) : sysconf(CInt(_SC_PAGESIZE))) * 16
-		#else
-			let readSize = sysconf(CInt(_SC_PAGESIZE)) * 16
-		#endif
+protocol Decompressor {
+	static func decompress(data: [UInt8], decompressedSize: Int) -> [UInt8]
+}
 
-		Task {
-			while await withCheckedContinuation({ continuation in
-				#if PROFILING
-					let id = OSSignpostID(log: readLog)
-					os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
+public enum DefaultDecompressor {
+	enum Zlib: Decompressor {
+		static func decompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
+			return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
+				#if canImport(Compression)
+					let zlibSkip = 2  // Apple's decoder doesn't want to see CMF/FLG (see RFC 1950)
+					data[data.index(data.startIndex, offsetBy: zlibSkip)...].withUnsafeBufferPointer {
+						precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, $0.baseAddress!, $0.count, nil, COMPRESSION_ZLIB) == decompressedSize)
+					}
+				#else
+					var size = decompressedSize
+					precondition(uncompress(buffer.baseAddress!, &size, data, UInt(data.count)) == Z_OK)
+					precondition(size == decompressedSize)
 				#endif
-				var chunk = DispatchData.empty
-				io.read(offset: 0, length: readSize, queue: .main) { done, data, error in
-					guard error == 0 else {
-						stream.finish(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(error)))
-						continuation.resume(returning: false)
-						return
-					}
-
-					chunk.append(data!)
-
-					#if PROFILING
-						os_signpost(.event, log: readLog, name: "Read", signpostID: id, "Read %td bytes", data!.count)
-					#endif
-
-					if done {
-						if chunk.isEmpty {
-							#if PROFILING
-								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended final read")
-							#endif
-							stream.finish()
-							continuation.resume(returning: false)
-						} else {
-							#if PROFILING
-								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
-							#endif
-							let chunk = chunk
-							Task {
-								await stream.yield(
-									[UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
-										_ = chunk.copyBytes(to: buffer, from: nil)
-										count = chunk.count
-									})
-								continuation.resume(returning: true)
-								await statistics.noteRead(size: chunk.count)
-							}
-						}
-					}
-				}
-			}) {
+				count = decompressedSize
 			}
 		}
-
-		return DataStream(data: stream)
 	}
 
-	static func chunks(from content: DataStream<some AsyncSequence>) -> BackpressureStream<Chunk, CountedBackpressure<Chunk>> {
+	enum LZMA: Decompressor {
+		static func decompress(data: [UInt8], decompressedSize: Int) -> [UInt8] {
+			let magic = [0xfd] + "7zX".utf8
+			precondition(data.prefix(magic.count).elementsEqual(magic))
+			return [UInt8](unsafeUninitializedCapacity: decompressedSize) { buffer, count in
+				#if canImport(Compression)
+					precondition(compression_decode_buffer(buffer.baseAddress!, decompressedSize, data, data.count, nil, COMPRESSION_LZMA) == decompressedSize)
+				#else
+					var memlimit = UInt64.max
+					var inIndex = 0
+					var outIndex = 0
+					precondition(lzma_stream_buffer_decode(&memlimit, 0, nil, data, &inIndex, data.count, buffer.baseAddress, &outIndex, decompressedSize) == LZMA_OK)
+					precondition(inIndex == data.count && outIndex == decompressedSize)
+				#endif
+				count = decompressedSize
+			}
+		}
+	}
+}
+
+public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+	public typealias Input = DataReader<S>
+	public typealias Next = Chunks
+
+	public struct Options {
+		let zlibDecompressor: ([UInt8], Int) -> [UInt8]
+		let lzmaDecompressor: ([UInt8], Int) -> [UInt8]
+
+		init<Zlib: Decompressor, LZMA: Decompressor>(zlibDecompressor: Zlib.Type, lzmaDecompressor: LZMA.Type) {
+			self.zlibDecompressor = Zlib.decompress
+			self.lzmaDecompressor = LZMA.decompress
+		}
+	}
+
+	static var defaultOptions: Options {
+		.init(zlibDecompressor: DefaultDecompressor.Zlib.self, lzmaDecompressor: DefaultDecompressor.LZMA.self)
+	}
+
+	static func locateContent(in file: inout DataReader<some AsyncSequence>, options: Options) async throws {
+		let fileStart = file.position
+
+		let magic = "xar!".utf8
+		try await async_precondition(await file.read(magic.count).elementsEqual(magic))
+		let headerSize = try await file.read(UInt16.self)
+		try await async_precondition(await file.read(UInt16.self) == 1)  // version
+		let tocCompressedSize = try await file.read(UInt64.self)
+		let tocDecompressedSize = try await file.read(UInt64.self)
+		_ = try await file.read(UInt32.self)  // checksum
+
+		_ = try await file.read(fileStart + Int(headerSize) - file.position)
+
+		let compressedTOC = try await file.read(Int(tocCompressedSize))
+		let toc = options.zlibDecompressor(compressedTOC, Int(tocDecompressedSize))
+
+		#if canImport(UIKit)
+			let document = xmlReadMemory(toc, CInt(toc.count), "", nil, 0)
+			defer {
+				xmlFreeDoc(document)
+			}
+			let context = xmlXPathNewContext(document)
+			defer {
+				xmlXPathFreeContext(context)
+			}
+
+			func evaluateXPath(node: xmlNodePtr!, xpath: String) -> String {
+				let result = xmlXPathNodeEval(node, xpath, context)!
+				defer {
+					xmlXPathFreeObject(result)
+				}
+				precondition(result.pointee.type == XPATH_NODESET && result.pointee.nodesetval.pointee.nodeNr == 1)
+				let string = xmlNodeListGetString(document, result.pointee.nodesetval.pointee.nodeTab.pointee!.pointee.children, 1)!
+				defer {
+					xmlFree(string)
+				}
+				return String(cString: string)
+			}
+
+			let result = xmlXPathEvalExpression("/xar/toc/file", context)!
+			defer {
+				xmlXPathFreeObject(result)
+			}
+			precondition(result.pointee.type == XPATH_NODESET)
+			let content = result.pointee.nodesetval.pointee.nodeTab[
+				(0..<Int(result.pointee.nodesetval.pointee.nodeNr)).first {
+					evaluateXPath(node: result.pointee.nodesetval.pointee.nodeTab[$0], xpath: "name") == "Content"
+				}!]
+
+			let contentOffset = Int(evaluateXPath(node: content, xpath: "data/offset"))!
+			let contentSize = Int(evaluateXPath(node: content, xpath: "data/length"))!
+		#else
+			let document = try! XMLDocument(data: Data(toc))
+			let content = try! document.nodes(forXPath: "/xar/toc/file").first {
+				try! $0.nodes(forXPath: "name").first!.stringValue! == "Content"
+			}!
+			let contentOffset = Int(try! content.nodes(forXPath: "data/offset").first!.stringValue!)!
+			let contentSize = Int(try! content.nodes(forXPath: "data/length").first!.stringValue!)!
+		#endif
+
+		_ = try await file.read(fileStart + Int(headerSize) + Int(tocCompressedSize) + contentOffset - file.position)
+		file.cap = file.position + contentSize
+	}
+
+	public static func transform(_ data: Input, options: Options?) -> Next.Input {
+		let options = options ?? Self.defaultOptions
+
 		let decompressionStream = ConcurrentStream<Void>(consumeResults: true)
 		let chunkStream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: Chunk.self)
 
-		// A consuming reference, but alas we can't express this right now
-		let _content = content
 		Task {
-			var content = _content
+			var content = data
+
+			do {
+				try await locateContent(in: &content, options: options)
+			} catch {
+				chunkStream.finish(throwing: error)
+			}
+
 			let magic = "pbzx".utf8
 			try await async_precondition(try await content.read(magic.count).elementsEqual(magic))
 			let chunkSize = try await content.read(UInt64.self)
@@ -980,7 +960,7 @@ struct Main {
 						let id = OSSignpostID(log: decompressionLog)
 						os_signpost(.begin, log: decompressionLog, name: "Decompress", signpostID: id, compressed ? "Starting %td (compressed size = %td)" : "Starting %td (uncompressed size = %td)", chunkNumber, compressedSize)
 					#endif
-					let chunk = Chunk(data: block, decompressedSize: compressed ? Int(decompressedSize) : nil)
+					let chunk = Chunk(data: block, decompressedSize: compressed ? Int(decompressedSize) : nil, lzmaDecompressor: options.lzmaDecompressor)
 					#if PROFILING
 						os_signpost(.end, log: decompressionLog, name: "Decompress", signpostID: id, "Ended %td (decompressed size = %td)", chunkNumber, decompressedSize)
 					#endif
@@ -995,13 +975,20 @@ struct Main {
 			await decompressionStream.finish()
 		}
 
-		return chunkStream
+		return .init(erasing: chunkStream)
 	}
+}
 
-	static func files<ChunkStream: AsyncSequence>(in chunkStream: ChunkStream) -> BackpressureStream<File, FileBackpressure> where ChunkStream.Element == Chunk {
+public enum Chunks: StreamAperture {
+	public typealias Input = AsyncThrowingStream<Chunk, Error>
+	public typealias Next = Files
+
+	public typealias Options = Never
+
+	public static func transform(_ chunks: Input, options: Options?) -> Next.Input {
 		let fileStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
 		Task {
-			var iterator = chunkStream.makeAsyncIterator()
+			var iterator = chunks.makeAsyncIterator()
 			var chunk = try! await iterator.next()!
 			var position = chunk.buffer.startIndex
 
@@ -1062,277 +1049,532 @@ struct Main {
 
 				guard file.name != "TRAILER!!!" else {
 					fileStream.finish()
+					// Formally finish the stream.
+					while try await iterator.next() != nil {
+						assertionFailure("Found chunks after the CPIO trailer")
+					}
 					return
 				}
 
 				await fileStream.yield(file)
 			}
 		}
-		return fileStream
+		return .init(erasing: fileStream)
+	}
+}
+
+public enum Files: StreamAperture {
+	public typealias Input = AsyncThrowingStream<File, Error>
+	public typealias Next = Disk
+
+	public struct Options {
+		public let compress: Bool
+		public let dryRun: Bool
+
+		public init(compress: Bool, dryRun: Bool) {
+			self.compress = compress
+			self.dryRun = dryRun
+		}
 	}
 
-	static func parseContent(_ content: DataStream<some AsyncSequence>) async throws {
+	static var defaultOptions: Options {
+		.init(compress: true, dryRun: false)
+	}
+
+	public static func transform(_ files: Input, options: Options?) -> Next.Input {
+		let options = options ?? Self.defaultOptions
 		let taskStream = ConcurrentStream<Void>()
-		let compressionStream = ConcurrentStream<[UInt8]?>(consumeResults: true)
 
-		var hardlinks = [File.Identifier: (String, Task<Void, Error>)]()
-		var directories = [Substring: Task<Void, Error>]()
+		actor Completion {
+			var queued = Queue<File>()
+			let completionStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
 
-		for try await file in files(in: chunks(from: content)) {
-			@Sendable
-			func measureFilesystemOperation<T>(named name: StaticString, _ operation: () -> T) -> T {
-				#if PROFILING
-					let id = OSSignpostID(log: filesystemLog)
-					os_signpost(.begin, log: filesystemLog, name: name, signpostID: id, "Starting %s for %s", name.description, file.name)
-					defer {
-						os_signpost(.end, log: filesystemLog, name: name, signpostID: id, "Completed")
-					}
-				#endif
-				return operation()
+			func complete(_ file: File) {
+				queued.push(file)
 			}
 
-			@Sendable
-			func warn(_ result: CInt, _ operation: String) {
-				if result != 0 {
-					perror("\(operation) \(file.name) failed")
+			func waitForCompletions() async {
+				while !queued.empty {
+					await completionStream.yield(queued.pop())
 				}
 			}
+		}
+		let completion = Completion()
 
-			// The assumption is that all directories are provided without trailing slashes
-			func parentDirectory<S: StringProtocol>(of path: S) -> S.SubSequence {
-				path[..<path.lastIndex(of: "/")!]
-			}
+		Task {
+			let compressionStream = ConcurrentStream<[UInt8]?>(consumeResults: true)
 
-			// https://bugs.swift.org/browse/SR-15816
-			func parentDirectoryTask(for: File) -> Task<Void, Error>? {
-				directories[parentDirectory(of: file.name)] ?? directories[String(parentDirectory(of: file.name))[...]]
-			}
+			var hardlinks = [File.Identifier: (String, Task<Void, Error>)]()
+			var directories = [Substring: Task<Void, Error>]()
 
-			@Sendable
-			func setStickyBit(on file: File) {
-				if file.sticky {
-					measureFilesystemOperation(named: "chmod") {
-						warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
-					}
+			for try await file in files {
+				await completion.waitForCompletions()
 
+				@Sendable
+				func measureFilesystemOperation<T>(named name: StaticString, _ operation: () -> T) -> T {
+					#if PROFILING
+						let id = OSSignpostID(log: filesystemLog)
+						os_signpost(.begin, log: filesystemLog, name: name, signpostID: id, "Starting %s for %s", name.description, file.name)
+						defer {
+							os_signpost(.end, log: filesystemLog, name: name, signpostID: id, "Completed")
+						}
+					#endif
+					return operation()
 				}
-			}
 
-			if file.name == "." {
-				continue
-			}
-
-			if options.verbose {
-				print(file.name)
-			}
-
-			if let (original, originalTask) = hardlinks[file.identifier] {
-				let task = parentDirectoryTask(for: file)
-				assert(task != nil, file.name)
-				await taskStream.addTask {
-					_ = try await (originalTask.value, task?.value)
-					guard !options.dryRun else {
-						return
-					}
-
-					measureFilesystemOperation(named: "link") {
-						warn(link(original, file.name), "linking")
+				@Sendable
+				func warn(_ result: CInt, _ operation: String) {
+					if result != 0 {
+						perror("\(operation) \(file.name) failed")
 					}
 				}
-				await statistics.noteHardlink()
-				continue
-			}
 
-			switch file.type {
-				case .symlink:
-					let task = parentDirectoryTask(for: file)
-					assert(task != nil, file.name)
+				// The assumption is that all directories are provided without trailing slashes
+				func parentDirectory<S: StringProtocol>(of path: S) -> S.SubSequence {
+					path[..<path.lastIndex(of: "/")!]
+				}
+
+				// https://bugs.swift.org/browse/SR-15816
+				func parentDirectoryTask(for: File) -> Task<Void, Error>? {
+					directories[parentDirectory(of: file.name)] ?? directories[String(parentDirectory(of: file.name))[...]]
+				}
+
+				@Sendable
+				func setStickyBit(on file: File) {
+					if file.sticky {
+						measureFilesystemOperation(named: "chmod") {
+							warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
+						}
+					}
+				}
+
+				@Sendable @discardableResult
+				func addTask(_ operation: @escaping @Sendable () async throws -> Void) async -> Task<Void, Error> {
 					await taskStream.addTask {
-						try await task?.value
-						guard !options.dryRun else {
-							return
-						}
-
-						measureFilesystemOperation(named: "symlink") {
-							warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, file.name), "symlinking")
-						}
-						setStickyBit(on: file)
+						try await operation()
+						await completion.complete(file)
 					}
-				case .directory:
-					let task = parentDirectoryTask(for: file)
-					assert(task != nil || parentDirectory(of: file.name) == ".", file.name)
-					directories[file.name[...]] = await taskStream.addTask {
-						try await task?.value
-						guard !options.dryRun else {
-							return
-						}
+				}
 
-						measureFilesystemOperation(named: "mkdir") {
-							warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
-						}
-						setStickyBit(on: file)
-					}
-				case .regular:
+				if file.name == "." {
+					continue
+				}
+
+				if let (original, originalTask) = hardlinks[file.identifier] {
 					let task = parentDirectoryTask(for: file)
 					assert(task != nil, file.name)
-					hardlinks[file.identifier] = (
-						file.name,
-						await taskStream.addTask {
+					await addTask {
+						_ = try await (originalTask.value, task?.value)
+						guard !options.dryRun else {
+							return
+						}
+
+						measureFilesystemOperation(named: "link") {
+							warn(link(original, file.name), "linking")
+						}
+					}
+					continue
+				}
+
+				switch file.type {
+					case .symlink:
+						let task = parentDirectoryTask(for: file)
+						assert(task != nil, file.name)
+						await addTask {
 							try await task?.value
-
-							#if canImport(Darwin)
-								let compressedData =
-									options.compress
-									? try! await compressionStream.addTask {
-										await file.compressedData()
-									}.result.get() : nil
-							#endif
-
 							guard !options.dryRun else {
 								return
 							}
 
-							let fd = measureFilesystemOperation(named: "open") {
-								open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+							measureFilesystemOperation(named: "symlink") {
+								warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, file.name), "symlinking")
 							}
-							if fd < 0 {
-								warn(fd, "creating file at")
+							setStickyBit(on: file)
+						}
+					case .directory:
+						let task = parentDirectoryTask(for: file)
+						assert(task != nil || parentDirectory(of: file.name) == ".", file.name)
+						directories[file.name[...]] = await addTask {
+							try await task?.value
+							guard !options.dryRun else {
 								return
 							}
-							defer {
-								measureFilesystemOperation(named: "close") {
-									warn(close(fd), "closing")
-								}
-								setStickyBit(on: file)
-							}
 
-							#if canImport(Darwin)
-								if let compressedData = compressedData,
-									file.write(compressedData: compressedData, toDescriptor: fd)
-								{
+							measureFilesystemOperation(named: "mkdir") {
+								warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
+							}
+							setStickyBit(on: file)
+						}
+					case .regular:
+						let task = parentDirectoryTask(for: file)
+						assert(task != nil, file.name)
+						hardlinks[file.identifier] = (
+							file.name,
+							await addTask {
+								try await task?.value
+
+								#if canImport(Darwin)
+									let compressedData =
+										options.compress
+										? try! await compressionStream.addTask {
+											await file.compressedData()
+										}.result.get() : nil
+								#endif
+
+								guard !options.dryRun else {
 									return
 								}
-							#endif
 
-							var position = 0
-							outer: for data in file.data {
-								var written = 0
-								// TODO: handle partial writes smarter
-								repeat {
-									written = data.withUnsafeBytes { data in
-										measureFilesystemOperation(named: "pwrite") {
-											pwrite(fd, data.baseAddress, data.count, off_t(position))
+								let fd = measureFilesystemOperation(named: "open") {
+									open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+								}
+								if fd < 0 {
+									warn(fd, "creating file at")
+									return
+								}
+								defer {
+									measureFilesystemOperation(named: "close") {
+										warn(close(fd), "closing")
+									}
+									setStickyBit(on: file)
+								}
+
+								#if canImport(Darwin)
+									if let compressedData = compressedData,
+										file.write(compressedData: compressedData, toDescriptor: fd)
+									{
+										return
+									}
+								#endif
+
+								var position = 0
+								outer: for data in file.data {
+									var written = 0
+									// TODO: handle partial writes smarter
+									repeat {
+										written = data.withUnsafeBytes { data in
+											measureFilesystemOperation(named: "pwrite") {
+												pwrite(fd, data.baseAddress, data.count, off_t(position))
+											}
 										}
-									}
-									if written < 0 {
-										warn(-1, "writing chunk to")
-										break outer
-									}
-								} while written != data.count
-								position += written
+										if written < 0 {
+											warn(-1, "writing chunk to")
+											break outer
+										}
+									} while written != data.count
+									position += written
+								}
 							}
-						}
-					)
-			}
-
-			await statistics.note(file)
-		}
-
-		await taskStream.finish()
-
-		// Run through any stragglers
-		for try await _ in taskStream.results {
-		}
-	}
-
-	static func locateContent(in file: inout DataStream<some AsyncSequence>) async throws {
-		let fileStart = file.position
-
-		let magic = "xar!".utf8
-		try await async_precondition(await file.read(magic.count).elementsEqual(magic))
-		let headerSize = try await file.read(UInt16.self)
-		try await async_precondition(await file.read(UInt16.self) == 1)  // version
-		let tocCompressedSize = try await file.read(UInt64.self)
-		let tocDecompressedSize = try await file.read(UInt64.self)
-		_ = try await file.read(UInt32.self)  // checksum
-
-		_ = try await file.read(fileStart + Int(headerSize) - file.position)
-
-		let compressedTOC = try await file.read(Int(tocCompressedSize))
-		let toc = DefaultCompressor.zlibDecompress(data: compressedTOC, decompressedSize: Int(tocDecompressedSize))
-
-		#if canImport(UIKit)
-			let document = xmlReadMemory(toc, CInt(toc.count), "", nil, 0)
-			defer {
-				xmlFreeDoc(document)
-			}
-			let context = xmlXPathNewContext(document)
-			defer {
-				xmlXPathFreeContext(context)
-			}
-
-			func evaluateXPath(node: xmlNodePtr!, xpath: String) -> String {
-				let result = xmlXPathNodeEval(node, xpath, context)!
-				defer {
-					xmlXPathFreeObject(result)
+						)
 				}
-				precondition(result.pointee.type == XPATH_NODESET && result.pointee.nodesetval.pointee.nodeNr == 1)
-				let string = xmlNodeListGetString(document, result.pointee.nodesetval.pointee.nodeTab.pointee!.pointee.children, 1)!
-				defer {
-					xmlFree(string)
-				}
-				return String(cString: string)
 			}
 
-			let result = xmlXPathEvalExpression("/xar/toc/file", context)!
-			defer {
-				xmlXPathFreeObject(result)
+			await taskStream.finish()
+
+			// Run through any stragglers
+			for try await _ in taskStream.results {
 			}
-			precondition(result.pointee.type == XPATH_NODESET)
-			let content = result.pointee.nodesetval.pointee.nodeTab[
-				(0..<Int(result.pointee.nodesetval.pointee.nodeNr)).first {
-					evaluateXPath(node: result.pointee.nodesetval.pointee.nodeTab[$0], xpath: "name") == "Content"
-				}!]
 
-			let contentOffset = Int(evaluateXPath(node: content, xpath: "data/offset"))!
-			let contentSize = Int(evaluateXPath(node: content, xpath: "data/length"))!
-		#else
-			let document = try! XMLDocument(data: Data(toc))
-			let content = try! document.nodes(forXPath: "/xar/toc/file").first {
-				try! $0.nodes(forXPath: "name").first!.stringValue! == "Content"
-			}!
-			let contentOffset = Int(try! content.nodes(forXPath: "data/offset").first!.stringValue!)!
-			let contentSize = Int(try! content.nodes(forXPath: "data/length").first!.stringValue!)!
-		#endif
-
-		_ = try await file.read(fileStart + Int(headerSize) + Int(tocCompressedSize) + contentOffset - file.position)
-		file.cap = file.position + contentSize
-	}
-
-	static func main() async throws {
-		let handle: FileHandle
-		if let input = options.input {
-			handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: input))
-			try handle.seekToEnd()
-			await statistics.setTotal(Int(try handle.offset()))
-			try handle.seek(toOffset: 0)
-		} else {
-			handle = FileHandle.standardInput
+			await completion.waitForCompletions()
+			completion.completionStream.finish()
 		}
 
-		if let output = options.output {
-			guard chdir(output) == 0 else {
-				fputs("Failed to access output directory at \(output): \(String(cString: strerror(errno)))", stderr)
-				exit(EXIT_FAILURE)
-			}
-		}
-
-		var file = dataStream(descriptor: handle.fileDescriptor)
-		try await locateContent(in: &file)
-		try await parseContent(file)
-
-		if options.printStatistics {
-			await statistics.printStatistics()
-		}
+		return .init(erasing: completion.completionStream)
 	}
 }
+
+public enum Disk: StreamAperture {
+	public typealias Input = AsyncThrowingStream<File, Error>
+	public typealias Next = Disk  // Irrelevant because this is never used
+
+	public typealias Options = Never
+
+	public static func transform(_ files: Input, options: Options?) -> Next.Input {
+		fatalError()
+	}
+}
+
+public struct UnxipStream<T: StreamAperture> {
+	public static func xip<S: AsyncSequence>(wrapping: S) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+		return .init()
+	}
+
+	public static func xip<S: AsyncSequence>(input: DataReader<S>) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+		return .init()
+	}
+
+	public static var chunks: UnxipStream<Chunks> {
+		.init()
+	}
+
+	public static var files: UnxipStream<Files> {
+		.init()
+	}
+
+	public static var disk: UnxipStream<Disk> {
+		.init()
+	}
+}
+
+public struct Unxip {
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil, _ option3: Start.Next.Next.Options? = nil) -> End.Input where Start.Next.Next.Next == End {
+		Start.Next.Next.transform(Start.Next.transform(Start.transform(input, options: option1), options: option2), options: option3)
+	}
+
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil) -> End.Input where Start.Next.Next == End {
+		Start.Next.transform(Start.transform(input, options: option1), options: option2)
+	}
+
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil) -> End.Input where Start.Next == End {
+		Start.transform(input, options: option1)
+	}
+
+	// For completeness, really
+	public static func makeStream<StartEnd: StreamAperture>(from start: UnxipStream<StartEnd>, to end: UnxipStream<StartEnd>, input: StartEnd.Input) -> StartEnd.Input {
+		input
+	}
+}
+
+extension AsyncThrowingStream where Failure == Error {
+	public func lockstepSplit() -> (Self, Self) {
+		let pal = PermissiveActionLink(iterator: makeAsyncIterator(), count: 2)
+
+		return (
+			Self {
+				try await pal.next()
+			},
+			Self {
+				try await pal.next()
+			}
+		)
+	}
+}
+
+// MARK: - unxip
+
+#if !LIBUNXIP
+	@main
+	struct Main {
+		struct Options {
+			static let options: [(flag: String, name: StaticString, description: StringLiteralType)] = [
+				("V", "version", "Print the unxip version number."),
+				("c", "compression-disable", "Disable APFS compression of result."),
+				("h", "help", "Print this help message."),
+				("n", "dry-run", "Dry run. (Often useful with -v.)"),
+				("s", "statistics", "Print statistics on completion."),
+				("v", "verbose", "Print xip file contents."),
+			]
+			static let version = "2.2"
+
+			var input: String?
+			var output: String?
+			var compress = true
+			var dryRun = false
+			var printStatistics = false
+			var verbose = false
+
+			init() {
+				let options =
+					Self.options.map {
+						option(name: $0.name, has_arg: no_argument, flag: nil, val: $0.flag)
+					} + [option(name: nil, has_arg: 0, flag: nil, val: 0)]
+				repeat {
+					let result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, Self.options.map(\.flag).reduce("", +), options, nil)
+					if result < 0 {
+						break
+					}
+					switch UnicodeScalar(UInt32(result)) {
+						case "V":
+							Self.printVersion()
+						case "c":
+							compress = false
+						case "n":
+							dryRun = true
+						case "h":
+							Self.printUsage(nominally: true)
+						case "s":
+							printStatistics = true
+						case "v":
+							verbose = true
+						default:
+							Self.printUsage(nominally: false)
+					}
+				} while true
+
+				let arguments = UnsafeBufferPointer(start: CommandLine.unsafeArgv + Int(optind), count: Int(CommandLine.argc - optind)).map {
+					String(cString: $0!)
+				}
+
+				guard let input = arguments.first else {
+					Self.printUsage(nominally: false)
+				}
+
+				self.input = input == "-" ? nil : input
+				self.output = arguments.dropFirst().first
+			}
+
+			static func printVersion() -> Never {
+				print("unxip \(version)")
+				exit(EXIT_SUCCESS)
+			}
+
+			static func printUsage(nominally: Bool) -> Never {
+				fputs(
+					"""
+					A fast Xcode unarchiver
+
+					USAGE: unxip [options] <input> [output]
+
+					OPTIONS:
+
+					""", nominally ? stdout : stderr)
+
+				assert(options.map(\.flag) == options.map(\.flag).sorted())
+				let maxWidth = options.map(\.name.utf8CodeUnitCount).max()!
+				for option in options {
+					let line = "    -\(option.flag), --\(option.name.description.padding(toLength: maxWidth, withPad: " ", startingAt: 0))  \(option.description)\n"
+					assert(line.count <= 80)
+					fputs(line, nominally ? stdout : stderr)
+				}
+
+				exit(nominally ? EXIT_SUCCESS : EXIT_FAILURE)
+			}
+		}
+
+		actor Statistics {
+			static let byteCountFormatter: ByteCountFormatter = {
+				let byteCountFormatter = ByteCountFormatter()
+				byteCountFormatter.allowsNonnumericFormatting = false
+				return byteCountFormatter
+			}()
+
+			// There seems to be a compiler bug where this needs to be outside of init
+			static func start() -> Any? {
+				if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *) {
+					return ContinuousClock.now
+				} else {
+					return nil
+				}
+			}
+
+			var start: Any?
+			var files = 0
+			var directories = 0
+			var symlinks = 0
+			var hardlinks = 0
+			var read = 0
+			var total: Int?
+			var identifiers = Set<File.Identifier>()
+
+			let source: DispatchSourceSignal
+
+			init() {
+				start = Self.start()
+
+				let watchedSignal: CInt
+				#if canImport(Darwin)
+					watchedSignal = SIGINFO
+				#else
+					watchedSignal = SIGUSR1
+					signal(watchedSignal, SIG_IGN)
+				#endif
+
+				let source = DispatchSource.makeSignalSource(signal: watchedSignal)
+				self.source = source
+				source.setEventHandler {
+					Task {
+						await self.printStatistics()
+					}
+				}
+				source.resume()
+
+			}
+
+			func note(_ file: File) {
+				switch file.type {
+					case .regular:
+						if identifiers.contains(file.identifier) {
+							hardlinks += 1
+						} else {
+							files += 1
+							identifiers.insert(file.identifier)
+						}
+					case .directory:
+						directories += 1
+					case .symlink:
+						symlinks += 1
+				}
+			}
+
+			func noteRead(size bytes: Int) {
+				read += bytes
+			}
+
+			func setTotal(_ total: Int) {
+				self.total = total
+			}
+
+			func printStatistics() {
+				print("Read \(Self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
+				if let total = total {
+					print(" (out of \(Self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
+				}
+				if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *),
+					let start = start as? ContinuousClock.Instant
+				{
+					#if canImport(Darwin)
+						let duration = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 2)))
+					#else
+						let duration = ContinuousClock.now - start
+					#endif
+					print(" in \(duration)")
+				} else {
+					print()
+				}
+				print("Created \(files) files, \(directories) directories, \(symlinks) symlinks, and \(hardlinks) hardlinks")
+			}
+		}
+
+		static func main() async throws {
+			let options = Options()
+			let statistics = Statistics()
+
+			let handle: FileHandle
+			if let input = options.input {
+				handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: input))
+				try handle.seekToEnd()
+				await statistics.setTotal(Int(try handle.offset()))
+				try handle.seek(toOffset: 0)
+			} else {
+				handle = FileHandle.standardInput
+			}
+
+			if let output = options.output {
+				guard chdir(output) == 0 else {
+					fputs("Failed to access output directory at \(output): \(String(cString: strerror(errno)))", stderr)
+					exit(EXIT_FAILURE)
+				}
+			}
+
+			let file = AsyncThrowingStream(erasing: DataReader.data(readingFrom: handle.fileDescriptor))
+			let (data, input) = file.lockstepSplit()
+
+			Task {
+				for try await data in data {
+					await statistics.noteRead(size: data.count)
+				}
+			}
+
+			for try await file in Unxip.makeStream(from: .xip(wrapping: input), to: .disk, input: DataReader(data: input), nil, nil, .init(compress: options.compress, dryRun: options.dryRun)) {
+				await statistics.note(file)
+				if options.verbose {
+					print(file.name)
+				}
+			}
+
+			if options.printStatistics {
+				await statistics.printStatistics()
+			}
+		}
+	}
+#endif

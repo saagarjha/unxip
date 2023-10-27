@@ -49,6 +49,33 @@ As the tool is still somewhat rough, its error handling is not very good at the 
 > **Warning**  
 > For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation. Consider downloading XIPs only from sources you trust, such as directly from Apple.
 
+## libunxip
+
+While the unxip command-line tool provides a versatile set of functionality to suit most needs, for specialized usecases the internals of unxip are available via a Swift stream-based interface called libunxip. At its core, it provides views into the following streams (for discussion of why these were chosen, see the [Design](#Design) section below):
+
+* A stream of data that represents a raw XIP file, perhaps read from disk or the network
+* A stream of decompressed `Chunk`s, which linearly reassemble into a CPIO archive
+* A stream of `File`s carved out of the CPIO
+* A stream of completions as each `File` is written to disk
+
+In addition to providing some utility functions to read files and handle asynchronous iteration, libunxip handles the hard part of transforming one stream to another, and provides you with an `AsyncSequence` that you can inspect, consume, or pass back to another step in the pipeline. For example, this code counts how many directories are in a XIP file read from standard in and skips writing to disk:
+
+```swift
+import libunxip
+
+let data = DataReader(descriptor: STDIN_FILENO)
+var directories = 0
+for try await file in Unxip.makeStream(from: .xip(input: data), to: .files, input: data) where file.type == .directory {
+	directories += 1
+}
+print("This XIP contains \(directories) directories")
+```
+
+For an example of more advanced usage, unxip itself is implemented using libunxip's APIs and can serve as a starting point for your own code.
+
+> **Important**  
+> libunxip can produce data *very* quickly, especially when working with intermediate streams of uncompressed data. The internal buffers backing the library have heavy backpressure applied to them to avoid overloading slower consumers. Nevertheless, irresponsible usage (such as wrapping the data in your own sequence or holding on to objects) can very easily lead to data piling up in memory at multiple GB/s. For best results, keep your processing short and copy out just data you require rather than persisting a whole `Chunk` or `File` you don't need. When splitting streams, use the lockstep APIs provided, which will ensure that one side doesn't run ahead of and overwhelm the other.
+
 ## Contributing
 
 When making changes, be sure to use [swift-format](https://github.com/apple/swift-format) on the source:

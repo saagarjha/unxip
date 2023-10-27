@@ -39,7 +39,8 @@ let package = Package(
 		.macOS(.v11), .iOS(.v14), .watchOS(.v7),
 	],
 	products: [
-		.executable(name: "unxip", targets: ["unxip"])
+		.executable(name: "unxip", targets: ["unxip"]),
+		.library(name: "libunxip", targets: ["libunxip"]),
 	],
 	targets: [
 		.executableTarget(
@@ -53,6 +54,11 @@ let package = Package(
 				"Makefile",
 			],
 			sources: ["unxip.swift"]
-		)
+		),
+		.target(
+			name: "libunxip",
+			dependencies: dependencies,
+			swiftSettings: [.define("LIBUNXIP")]
+		),
 	] + systemLibraries
 )
