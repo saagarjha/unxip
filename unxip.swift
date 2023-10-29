@@ -1400,7 +1400,7 @@ extension AsyncThrowingStream where Failure == Error {
 				("s", "statistics", "Print statistics on completion."),
 				("v", "verbose", "Print xip file contents."),
 			]
-			static let version = "2.2"
+			static let version = "3.0"
 
 			var input: String?
 			var output: String?
