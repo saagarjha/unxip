@@ -33,6 +33,9 @@ jobs:
         if: ${{ !startsWith( matrix.os, 'macos' ) }}
         run: eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" && brew install swift
 
+      - name: Build unxip
+        run: swift build --configuration release
+
       - name: Download Xcode
         run: wget http://server.saagarjha.com/Xcode_15_beta.xip.encrypted
 
@@ -41,9 +44,6 @@ jobs:
         env:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
         run: openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_15_beta.xip.encrypted > Xcode_15_beta.xip
-
-      - name: Build unxip
-        run: swift build --configuration release
 
       - name: Run unxip
         run: .build/release/unxip -s Xcode_15_beta.xip /tmp | grep -q 'Created 74201 files, 19130 directories, 7699 symlinks, and 16601 hardlinks'
