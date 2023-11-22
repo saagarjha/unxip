@@ -113,12 +113,12 @@ struct Queue<Element> {
 }
 
 extension AsyncThrowingStream where Failure == Error {
-	actor PermissiveActionLink {
-		var iterator: Iterator
+	actor PermissiveActionLink<S: AsyncSequence> where S.Element == Element {
+		var iterator: S.AsyncIterator
 		let count: Int
 		var queued = [CheckedContinuation<Element?, Error>]()
 
-		init(iterator: Iterator, count: Int) {
+		init(iterator: S.AsyncIterator, count: Int) {
 			self.iterator = iterator
 			self.count = count
 		}
@@ -1371,15 +1371,15 @@ public struct Unxip {
 	}
 }
 
-extension AsyncThrowingStream where Failure == Error {
-	public func lockstepSplit() -> (Self, Self) {
-		let pal = PermissiveActionLink(iterator: makeAsyncIterator(), count: 2)
+extension AsyncSequence {
+	public func lockstepSplit() -> (AsyncThrowingStream<Element, Error>, AsyncThrowingStream<Element, Error>) {
+		let pal = AsyncThrowingStream.PermissiveActionLink<Self>(iterator: makeAsyncIterator(), count: 2)
 
 		return (
-			Self {
+			.init {
 				try await pal.next()
 			},
-			Self {
+			.init {
 				try await pal.next()
 			}
 		)
@@ -1592,7 +1592,7 @@ extension AsyncThrowingStream where Failure == Error {
 				}
 			}
 
-			let file = AsyncThrowingStream(erasing: DataReader.data(readingFrom: handle.fileDescriptor))
+			let file = DataReader.data(readingFrom: handle.fileDescriptor)
 			let (data, input) = file.lockstepSplit()
 
 			Task {
