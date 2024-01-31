@@ -151,7 +151,7 @@ extension AsyncThrowingStream where Failure == Error {
 		}
 	}
 
-	init<S: AsyncSequence>(erasing sequence: S) where S.Element == Element {
+	public init<S: AsyncSequence>(erasing sequence: S) where S.Element == Element {
 		var iterator = sequence.makeAsyncIterator()
 		self.init {
 			try await iterator.next()
