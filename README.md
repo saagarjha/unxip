@@ -33,8 +33,6 @@ $ make install
 
 The installation prefix is configurable via the `PREFIX` variable.
 
-unxip is not currently designed to be embedded directly into the address space of another application. While it would "work" (with minor modifications to allow linking) its implementation expects to be the only user of the cooperative thread pool and effectively takes it over, which may adversely affect other code that wishes to run on it. The recommended way to use unxip is spawning it as a subtask.
-
 ## Usage
 
 The intended usage of unxip is with a single command line parameter that represents the path to an XIP from Apple that contains Xcode. For example:
