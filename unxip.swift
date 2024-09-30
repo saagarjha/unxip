@@ -1,3 +1,8 @@
+#if canImport(Glibc)
+	@preconcurrency import SwiftGlibc  // stdout, stderr
+#else
+	@preconcurrency import unistd  // optind
+#endif
 import Foundation
 
 #if canImport(Compression)
@@ -5,7 +10,7 @@ import Foundation
 #else
 	import FoundationXML
 	import GNUSource
-	import getopt
+	@preconcurrency import getopt  // optind
 	import lzma
 	import zlib
 #endif
@@ -112,13 +117,52 @@ struct Queue<Element> {
 	}
 }
 
-extension AsyncThrowingStream where Failure == Error {
-	actor PermissiveActionLink<S: AsyncSequence> where S.Element == Element {
+protocol ErasedIterator<Element>: AsyncIteratorProtocol, Sendable {
+}
+
+public struct ErasedSequence<Element>: AsyncSequence {
+	struct ErasedButBarelyLikeWithThosePinkPearlThingsSequence<S: AsyncSequence>: AsyncSequence where S.AsyncIterator: Sendable {
+		struct Iterator: ErasedIterator {
+			var iterator: S.AsyncIterator
+
+			mutating func next() async throws -> S.Element? {
+				try await iterator.next()
+			}
+		}
+
+		let sequence: S
+
+		func makeAsyncIterator() -> Iterator {
+			.init(iterator: sequence.makeAsyncIterator())
+		}
+	}
+
+	public struct Iterator<T>: AsyncIteratorProtocol, Sendable {
+		var iterator: any ErasedIterator<Element>
+
+		public mutating func next() async throws -> Element? {
+			try await iterator.next()
+		}
+	}
+
+	let iterator: any ErasedIterator<Element>
+
+	init<S: AsyncSequence>(sequence: S) where S.Element == Element, S.AsyncIterator: Sendable {
+		iterator = ErasedButBarelyLikeWithThosePinkPearlThingsSequence(sequence: sequence).makeAsyncIterator()
+	}
+
+	public func makeAsyncIterator() -> Iterator<Element> {
+		.init(iterator: iterator)
+	}
+}
+
+extension AsyncThrowingStream where Element: Sendable, Failure == Error {
+	actor PermissiveActionLink<S: AsyncSequence> where S.Element == Element, S.AsyncIterator: Sendable {
 		var iterator: S.AsyncIterator
 		let count: Int
 		var queued = [CheckedContinuation<Element?, Error>]()
 
-		init(iterator: S.AsyncIterator, count: Int) {
+		init(iterator: sending S.AsyncIterator, count: Int) {
 			self.iterator = iterator
 			self.count = count
 		}
@@ -148,13 +192,6 @@ extension AsyncThrowingStream where Failure == Error {
 				continuation.resume(with: next)
 			}
 			queued.removeAll()
-		}
-	}
-
-	init<S: AsyncSequence>(erasing sequence: S) where S.Element == Element {
-		var iterator = sequence.makeAsyncIterator()
-		self.init {
-			try await iterator.next()
 		}
 	}
 }
@@ -210,7 +247,7 @@ final class FileBackpressure: BackpressureProvider {
 	}
 }
 
-actor BackpressureStream<Element, Backpressure: BackpressureProvider>: AsyncSequence where Backpressure.Element == Element {
+actor BackpressureStream<Element: Sendable, Backpressure: BackpressureProvider>: AsyncSequence where Backpressure.Element == Element {
 	struct Iterator: AsyncIteratorProtocol {
 		let stream: BackpressureStream
 
@@ -309,30 +346,11 @@ actor BackpressureStream<Element, Backpressure: BackpressureProvider>: AsyncSequ
 	}
 }
 
-actor ConcurrentStream<Element> {
-	class Wrapper {
-		var stream: AsyncThrowingStream<Element, Error>!
-		var continuation: AsyncThrowingStream<Element, Error>.Continuation!
-	}
+actor ConcurrentStream<Element: Sendable> {
+	let results: AsyncThrowingStream<Element, Error>
+	let continuation: AsyncThrowingStream<Element, Error>.Continuation
 
-	let wrapper = Wrapper()
 	let batchSize: Int
-	nonisolated var results: AsyncThrowingStream<Element, Error> {
-		get {
-			wrapper.stream
-		}
-		set {
-			wrapper.stream = newValue
-		}
-	}
-	nonisolated var continuation: AsyncThrowingStream<Element, Error>.Continuation {
-		get {
-			wrapper.continuation
-		}
-		set {
-			wrapper.continuation = newValue
-		}
-	}
 	var index = -1
 	var finishedIndex = Int?.none
 	var completedIndex = -1
@@ -341,9 +359,7 @@ actor ConcurrentStream<Element> {
 
 	init(batchSize: Int = 2 * ProcessInfo.processInfo.activeProcessorCount, consumeResults: Bool = false) {
 		self.batchSize = batchSize
-		results = AsyncThrowingStream<Element, Error> {
-			continuation = $0
-		}
+		(results, continuation) = AsyncThrowingStream.makeStream(of: Element.self, throwing: Error.self)
 		if consumeResults {
 			Task {
 				for try await _ in results {
@@ -531,7 +547,7 @@ public struct DataReader<S: AsyncSequence> where S.Element: RandomAccessCollecti
 	}
 }
 
-extension DataReader where S == AsyncThrowingStream<[UInt8], Error> {
+extension DataReader where S == ErasedSequence<[UInt8]> {
 	public init(descriptor: CInt) {
 		self.init(data: Self.data(readingFrom: descriptor))
 	}
@@ -580,13 +596,12 @@ extension DataReader where S == AsyncThrowingStream<[UInt8], Error> {
 							#if PROFILING
 								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
 							#endif
-							let chunk = chunk
+							let chunk = [UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
+								_ = chunk.copyBytes(to: buffer, from: nil)
+								count = chunk.count
+							}
 							Task {
-								await stream.yield(
-									[UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
-										_ = chunk.copyBytes(to: buffer, from: nil)
-										count = chunk.count
-									})
+								await stream.yield(chunk)
 								continuation.resume(returning: true)
 							}
 						}
@@ -596,7 +611,7 @@ extension DataReader where S == AsyncThrowingStream<[UInt8], Error> {
 			}
 		}
 
-		return .init(erasing: stream)
+		return .init(sequence: stream)
 	}
 }
 
@@ -615,7 +630,7 @@ public struct Chunk: Sendable {
 	}
 }
 
-public struct File {
+public struct File: Sendable {
 	public let dev: Int
 	public let ino: Int
 	public let mode: Int
@@ -819,9 +834,9 @@ public struct File {
 public protocol StreamAperture {
 	associatedtype Input
 	associatedtype Next: StreamAperture
-	associatedtype Options
+	associatedtype Options: Sendable
 
-	static func transform(_: Input, options: Options?) -> Next.Input
+	static func transform(_: sending Input, options: Options?) -> Next.Input
 }
 
 protocol Decompressor {
@@ -871,9 +886,9 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 	public typealias Input = DataReader<S>
 	public typealias Next = Chunks
 
-	public struct Options {
-		let zlibDecompressor: ([UInt8], Int) throws -> [UInt8]
-		let lzmaDecompressor: ([UInt8], Int) throws -> [UInt8]
+	public struct Options: Sendable {
+		let zlibDecompressor: @Sendable ([UInt8], Int) throws -> [UInt8]
+		let lzmaDecompressor: @Sendable ([UInt8], Int) throws -> [UInt8]
 
 		init<Zlib: Decompressor, LZMA: Decompressor>(zlibDecompressor: Zlib.Type, lzmaDecompressor: LZMA.Type) {
 			self.zlibDecompressor = Zlib.decompress
@@ -953,7 +968,7 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 		file.cap = file.position + contentSize
 	}
 
-	public static func transform(_ data: Input, options: Options?) -> Next.Input {
+	public static func transform(_ data: sending Input, options: Options?) -> Next.Input {
 		let options = options ?? Self.defaultOptions
 
 		let decompressionStream = ConcurrentStream<Void>(consumeResults: true)
@@ -1007,17 +1022,17 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 			await decompressionStream.finish()
 		}
 
-		return .init(erasing: chunkStream)
+		return .init(sequence: chunkStream)
 	}
 }
 
 public enum Chunks: StreamAperture {
-	public typealias Input = AsyncThrowingStream<Chunk, Error>
+	public typealias Input = ErasedSequence<Chunk>
 	public typealias Next = Files
 
 	public typealias Options = Never
 
-	public static func transform(_ chunks: Input, options: Options?) -> Next.Input {
+	public static func transform(_ chunks: sending Input, options: Options?) -> Next.Input {
 		let fileStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
 		Task {
 			var iterator = chunks.makeAsyncIterator()
@@ -1038,9 +1053,11 @@ public enum Chunks: StreamAperture {
 			}
 
 			func readOctal(from bytes: [UInt8]) throws -> Int {
-				try UnxipError.throw(.invalid, ifNil: String(data: Data(bytes), encoding: .utf8).map {
-					Int($0, radix: 8)
-				} ?? nil)
+				try UnxipError.throw(
+					.invalid,
+					ifNil: String(data: Data(bytes), encoding: .utf8).map {
+						Int($0, radix: 8)
+					} ?? nil)
 			}
 
 			while true {
@@ -1059,7 +1076,7 @@ public enum Chunks: StreamAperture {
 				var filesize = try readOctal(from: await read(size: 11))
 				let _name = try await read(size: namesize)
 				try UnxipError.throw(.invalid, if: _name.last != 0)
-				let name = String(cString: _name)
+				let name = String(decoding: _name.dropLast(), as: UTF8.self)
 				var file = File(dev: dev, ino: ino, mode: mode, name: name)
 
 				while filesize > 0 {
@@ -1095,15 +1112,15 @@ public enum Chunks: StreamAperture {
 				await fileStream.yield(file)
 			}
 		}
-		return .init(erasing: fileStream)
+		return .init(sequence: fileStream)
 	}
 }
 
 public enum Files: StreamAperture {
-	public typealias Input = AsyncThrowingStream<File, Error>
+	public typealias Input = ErasedSequence<File>
 	public typealias Next = Disk
 
-	public struct Options {
+	public struct Options: Sendable {
 		public let compress: Bool
 		public let dryRun: Bool
 
@@ -1117,7 +1134,7 @@ public enum Files: StreamAperture {
 		.init(compress: true, dryRun: false)
 	}
 
-	public static func transform(_ files: Input, options: Options?) -> Next.Input {
+	public static func transform(_ files: sending Input, options: Options?) -> Next.Input {
 		let options = options ?? Self.defaultOptions
 		let taskStream = ConcurrentStream<Void>()
 
@@ -1315,12 +1332,12 @@ public enum Files: StreamAperture {
 			completion.completionStream.finish()
 		}
 
-		return .init(erasing: completion.completionStream)
+		return .init(sequence: completion.completionStream)
 	}
 }
 
 public enum Disk: StreamAperture {
-	public typealias Input = AsyncThrowingStream<File, Error>
+	public typealias Input = ErasedSequence<File>
 	public typealias Next = Disk  // Irrelevant because this is never used
 
 	public typealias Options = Never
@@ -1353,15 +1370,16 @@ public struct UnxipStream<T: StreamAperture> {
 }
 
 public struct Unxip {
-	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil, _ option3: Start.Next.Next.Options? = nil) -> End.Input where Start.Next.Next.Next == End {
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: sending Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil, _ option3: Start.Next.Next.Options? = nil) -> End.Input where Start.Next.Next.Next == End {
 		Start.Next.Next.transform(Start.Next.transform(Start.transform(input, options: option1), options: option2), options: option3)
 	}
 
-	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil) -> End.Input where Start.Next.Next == End {
-		Start.Next.transform(Start.transform(input, options: option1), options: option2)
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: sending Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil) -> End.Input where Start.Next.Next == End {
+		let input = Start.transform(input, options: option1)
+		return Start.Next.transform(input, options: option2)
 	}
 
-	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: Start.Input, _ option1: Start.Options? = nil) -> End.Input where Start.Next == End {
+	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: sending Start.Input, _ option1: Start.Options? = nil) -> End.Input where Start.Next == End {
 		Start.transform(input, options: option1)
 	}
 
@@ -1371,7 +1389,7 @@ public struct Unxip {
 	}
 }
 
-extension AsyncSequence {
+extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
 	public func lockstepSplit() -> (AsyncThrowingStream<Element, Error>, AsyncThrowingStream<Element, Error>) {
 		let pal = AsyncThrowingStream.PermissiveActionLink<Self>(iterator: makeAsyncIterator(), count: 2)
 
