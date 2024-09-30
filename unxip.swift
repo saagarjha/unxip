@@ -386,53 +386,26 @@ actor ConcurrentStream<Element: Sendable> {
 		}
 	}
 
-	// Unsound workaround for https://github.com/apple/swift/issues/61658
-	enum BrokenBy61658 {
-		@_transparent
-		static func ensureWidth(_ stream: isolated ConcurrentStream, index: Int) async {
-			if index >= stream.batchSize {
-				await stream.widthConditions[index - stream.batchSize]!.wait()
-				stream.widthConditions.removeValue(forKey: index - stream.batchSize)
-			}
-		}
-
-		@_transparent
-		static func produce(_ stream: isolated ConcurrentStream, result: Result<Element, Error>, for index: Int) async {
-			if index != 0 {
-				await stream.orderingConditions[index - 1]!.wait()
-				stream.orderingConditions.removeValue(forKey: index - 1)
-			}
-			stream.orderingConditions[index]!.signal()
-			stream.continuation.yield(with: result)
-			if index == stream.finishedIndex {
-				stream.continuation.finish()
-			}
-			stream.widthConditions[index]!.signal()
-			stream.completedIndex += 1
+	func ensureWidth(index: Int) async {
+		if index >= batchSize {
+			await widthConditions[index - batchSize]!.wait()
+			widthConditions.removeValue(forKey: index - batchSize)
 		}
 	}
 
-	#if swift(<5.8)
-		@_optimize(none)
-		func ensureWidth(index: Int) async {
-			await BrokenBy61658.ensureWidth(self, index: index)
+	func produce(result: Result<Element, Error>, for index: Int) async {
+		if index != 0 {
+			await orderingConditions[index - 1]!.wait()
+			orderingConditions.removeValue(forKey: index - 1)
 		}
-	#else
-		func ensureWidth(index: Int) async {
-			await BrokenBy61658.ensureWidth(self, index: index)
+		orderingConditions[index]!.signal()
+		continuation.yield(with: result)
+		if index == finishedIndex {
+			continuation.finish()
 		}
-	#endif
-
-	#if swift(<5.8)
-		@_optimize(none)
-		func produce(result: Result<Element, Error>, for index: Int) async {
-			await BrokenBy61658.produce(self, result: result, for: index)
-		}
-	#else
-		func produce(result: Result<Element, Error>, for index: Int) async {
-			await BrokenBy61658.produce(self, result: result, for: index)
-		}
-	#endif
+		widthConditions[index]!.signal()
+		completedIndex += 1
+	}
 
 	func finish() {
 		finishedIndex = index
@@ -459,8 +432,7 @@ enum UnxipError: Error {
 	case truncated
 	case invalid
 
-	// https://github.com/apple/swift/issues/60318
-	static func async_throw<T>(_ error: @autoclosure () -> Self, ifNil expression: @autoclosure () async throws -> T?) async throws -> T {
+	static func `throw`<T>(_ error: @autoclosure () -> Self, ifNil expression: @autoclosure () async throws -> T?) async throws -> T {
 		if let value = try await expression() {
 			return value
 		} else {
@@ -476,8 +448,7 @@ enum UnxipError: Error {
 		}
 	}
 
-	// https://github.com/apple/swift/issues/60318
-	static func async_throw(_ error: @autoclosure () -> Self, if expression: @autoclosure () async throws -> Bool) async throws {
+	static func `throw`(_ error: @autoclosure () -> Self, if expression: @autoclosure () async throws -> Bool) async throws {
 		if try await expression() {
 			throw error()
 		}
@@ -535,7 +506,7 @@ public struct DataReader<S: AsyncSequence> where S.Element: RandomAccessCollecti
 
 	mutating func read(_ n: Int) async throws -> [UInt8] {
 		let data = try await read(upTo: n)
-		try UnxipError.throw(.truncated, if: data.count != n)
+		try await UnxipError.throw(.truncated, if: data.count != n)
 		return data
 	}
 
@@ -904,9 +875,9 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 		let fileStart = file.position
 
 		let magic = "xar!".utf8
-		try await UnxipError.async_throw(.invalid, if: await !file.read(magic.count).elementsEqual(magic))
+		try await UnxipError.throw(.invalid, if: await !file.read(magic.count).elementsEqual(magic))
 		let headerSize = try await file.read(UInt16.self)
-		try await UnxipError.async_throw(.invalid, if: await file.read(UInt16.self) != 1)  // version
+		try await UnxipError.throw(.invalid, if: await file.read(UInt16.self) != 1)  // version
 		let tocCompressedSize = try await file.read(UInt64.self)
 		let tocDecompressedSize = try await file.read(UInt64.self)
 		_ = try await file.read(UInt32.self)  // checksum
@@ -955,13 +926,13 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 			let contentSize = try UnxipError.throw(.invalid, ifNil: Int(evaluateXPath(node: content, xpath: "data/length")))
 		#else
 			let document = try XMLDocument(data: Data(toc))
-			let content = try UnxipError.throw(
+			let content = try await UnxipError.throw(
 				.invalid,
 				ifNil: document.nodes(forXPath: "/xar/toc/file").first {
 					try $0.nodes(forXPath: "name").first?.stringValue == "Content"
 				})
-			let contentOffset = try UnxipError.throw(.invalid, ifNil: content.nodes(forXPath: "data/offset").first?.stringValue.map(Int.init) ?? nil)
-			let contentSize = try UnxipError.throw(.invalid, ifNil: content.nodes(forXPath: "data/length").first?.stringValue.map(Int.init) ?? nil)
+			let contentOffset = try await UnxipError.throw(.invalid, ifNil: content.nodes(forXPath: "data/offset").first?.stringValue.map(Int.init) ?? nil)
+			let contentSize = try await UnxipError.throw(.invalid, ifNil: content.nodes(forXPath: "data/length").first?.stringValue.map(Int.init) ?? nil)
 		#endif
 
 		_ = try await file.read(fileStart + Int(headerSize) + Int(tocCompressedSize) + contentOffset - file.position)
@@ -984,7 +955,7 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 			}
 
 			let magic = "pbzx".utf8
-			try await UnxipError.async_throw(.invalid, if: await !content.read(magic.count).elementsEqual(magic))
+			try await UnxipError.throw(.invalid, if: await !content.read(magic.count).elementsEqual(magic))
 			let chunkSize = try await content.read(UInt64.self)
 			var decompressedSize: UInt64 = 0
 			var previousYield: Task<Void, Error>?
@@ -1036,14 +1007,14 @@ public enum Chunks: StreamAperture {
 		let fileStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
 		Task {
 			var iterator = chunks.makeAsyncIterator()
-			var chunk = try await UnxipError.async_throw(.truncated, ifNil: await iterator.next())
+			var chunk = try await UnxipError.throw(.truncated, ifNil: await iterator.next())
 			var position = chunk.buffer.startIndex
 
 			func read(size: Int) async throws -> [UInt8] {
 				var result = [UInt8]()
 				while result.count < size {
 					if position >= chunk.buffer.endIndex {
-						chunk = try await UnxipError.async_throw(.truncated, ifNil: await iterator.next())
+						chunk = try await UnxipError.throw(.truncated, ifNil: await iterator.next())
 						position = 0
 					}
 					result.append(chunk.buffer[chunk.buffer.startIndex + position])
@@ -1063,7 +1034,7 @@ public enum Chunks: StreamAperture {
 			while true {
 				let magic = try await read(size: 6)
 				// Yes, cpio.h really defines this global macro
-				try UnxipError.throw(.invalid, if: !magic.elementsEqual(MAGIC.utf8))
+				try await UnxipError.throw(.invalid, if: !magic.elementsEqual(MAGIC.utf8))
 				let dev = try readOctal(from: await read(size: 6))
 				let ino = try readOctal(from: await read(size: 6))
 				let mode = try readOctal(from: await read(size: 6))
@@ -1075,13 +1046,13 @@ public enum Chunks: StreamAperture {
 				let namesize = try readOctal(from: await read(size: 6))
 				var filesize = try readOctal(from: await read(size: 11))
 				let _name = try await read(size: namesize)
-				try UnxipError.throw(.invalid, if: _name.last != 0)
+				try await UnxipError.throw(.invalid, if: _name.last != 0)
 				let name = String(decoding: _name.dropLast(), as: UTF8.self)
 				var file = File(dev: dev, ino: ino, mode: mode, name: name)
 
 				while filesize > 0 {
 					if position >= chunk.buffer.endIndex {
-						chunk = try await UnxipError.async_throw(.truncated, ifNil: await iterator.next())
+						chunk = try await UnxipError.throw(.truncated, ifNil: await iterator.next())
 						position = chunk.buffer.startIndex
 					}
 					let end = chunk.buffer.index(position, offsetBy: filesize, limitedBy: chunk.buffer.endIndex) ?? chunk.buffer.endIndex
