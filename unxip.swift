@@ -1389,7 +1389,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
 				("s", "statistics", "Print statistics on completion."),
 				("v", "verbose", "Print xip file contents."),
 			]
-			static let version = "3.0"
+			static let version = "3.1"
 
 			var input: String?
 			var output: String?
