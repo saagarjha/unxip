@@ -44,7 +44,7 @@ $ curl https://webserver/Xcode.xip | unxip - /Applications # Read from a stream 
 
 As the tool is still somewhat rough, its error handling is not very good at the moment. An attempt has been made to at least crash preemptively when things go wrong, but you may still run into strange behavior on edge cases. For best results, ensure that the directory you are running unxip from does not contain any existing Xcode(-beta).app bundles and that you are using a modern version of macOS on a fast APFS filesystem.
 
-> **Warning**  
+> [!WARNING]  
 > For simplicity, unxip does not perform any signature verification, so if authentication is important you should use another mechanism (such as a checksum) for validation. Consider downloading XIPs only from sources you trust, such as directly from Apple.
 
 ## libunxip
@@ -71,7 +71,7 @@ print("This XIP contains \(directories) directories")
 
 For an example of more advanced usage, unxip itself is implemented using libunxip's APIs and can serve as a starting point for your own code.
 
-> **Important**  
+> [!IMPORTANT]  
 > libunxip can produce data *very* quickly, especially when working with intermediate streams of uncompressed data. The internal buffers backing the library have heavy backpressure applied to them to avoid overloading slower consumers. Nevertheless, irresponsible usage (such as wrapping the data in your own sequence or holding on to objects) can very easily lead to data piling up in memory at multiple GB/s. For best results, keep your processing short and copy out just data you require rather than persisting a whole `Chunk` or `File` you don't need. When splitting streams, use the lockstep APIs provided, which will ensure that one side doesn't run ahead of and overwhelm the other.
 
 ## Contributing
