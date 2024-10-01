@@ -1319,11 +1319,11 @@ public enum Disk: StreamAperture {
 }
 
 public struct UnxipStream<T: StreamAperture> {
-	public static func xip<S: AsyncSequence>(wrapping: S) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+	public static func xip<S: AsyncSequence>(wrapping: @autoclosure () -> S) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
 		return .init()
 	}
 
-	public static func xip<S: AsyncSequence>(input: DataReader<S>) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+	public static func xip<S: AsyncSequence>(input: @autoclosure () -> DataReader<S>) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
 		return .init()
 	}
 
@@ -1346,8 +1346,7 @@ public struct Unxip {
 	}
 
 	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: sending Start.Input, _ option1: Start.Options? = nil, _ option2: Start.Next.Options? = nil) -> End.Input where Start.Next.Next == End {
-		let input = Start.transform(input, options: option1)
-		return Start.Next.transform(input, options: option2)
+		return Start.Next.transform(Start.transform(input, options: option1), options: option2)
 	}
 
 	public static func makeStream<Start: StreamAperture, End: StreamAperture>(from start: UnxipStream<Start>, to end: UnxipStream<End>, input: sending Start.Input, _ option1: Start.Options? = nil) -> End.Input where Start.Next == End {
