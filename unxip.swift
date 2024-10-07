@@ -606,7 +606,7 @@ public struct File: Sendable {
 	public let ino: Int
 	public let mode: Int
 	public let name: String
-	public var data = [ArraySlice<UInt8>]()
+	public internal(set) var data = [ArraySlice<UInt8>]()
 	var looksIncompressible = false
 
 	struct Identifier: Hashable {
