@@ -344,6 +344,18 @@ actor BackpressureStream<Element: Sendable, Backpressure: BackpressureProvider>:
 		results = .error(error)
 		nextCondition?.signal()
 	}
+
+	@discardableResult
+	nonisolated func task<Success>(body: sending @escaping () async throws -> Success) -> Task<Success, Error> {
+		Task {
+			do {
+				return try await body()
+			} catch {
+				finish(throwing: error)
+				throw error
+			}
+		}
+	}
 }
 
 actor ConcurrentStream<Element: Sendable> {
@@ -945,14 +957,10 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 		let decompressionStream = ConcurrentStream<Void>(consumeResults: true)
 		let chunkStream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: Chunk.self)
 
-		Task {
+		chunkStream.task {
 			var content = data
 
-			do {
-				try await locateContent(in: &content, options: options)
-			} catch {
-				chunkStream.finish(throwing: error)
-			}
+			try await locateContent(in: &content, options: options)
 
 			let magic = "pbzx".utf8
 			try await UnxipError.throw(.invalid, if: await !content.read(magic.count).elementsEqual(magic))
@@ -1005,7 +1013,7 @@ public enum Chunks: StreamAperture {
 
 	public static func transform(_ chunks: sending Input, options: Options?) -> Next.Input {
 		let fileStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
-		Task {
+		fileStream.task {
 			var iterator = chunks.makeAsyncIterator()
 			var chunk = try await UnxipError.throw(.truncated, ifNil: await iterator.next())
 			var position = chunk.buffer.startIndex
@@ -1125,7 +1133,7 @@ public enum Files: StreamAperture {
 		}
 		let completion = Completion()
 
-		Task {
+		completion.completionStream.task {
 			let compressionStream = ConcurrentStream<[UInt8]?>(consumeResults: true)
 
 			var hardlinks = [File.Identifier: (String, Task<Void, Error>)]()
