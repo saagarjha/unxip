@@ -63,7 +63,7 @@ import libunxip
 
 let data = DataReader(descriptor: STDIN_FILENO)
 var directories = 0
-for try await file in Unxip.makeStream(from: .xip(input: data), to: .files, input: data) where file.type == .directory {
+for try await file in Unxip.makeStream(from: .xip(), to: .files(), input: data) where file.type == .directory {
 	directories += 1
 }
 print("This XIP contains \(directories) directories")

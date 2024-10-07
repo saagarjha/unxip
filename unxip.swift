@@ -1319,23 +1319,19 @@ public enum Disk: StreamAperture {
 }
 
 public struct UnxipStream<T: StreamAperture> {
-	public static func xip<S: AsyncSequence>(wrapping: @autoclosure () -> S) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
-		return .init()
-	}
-
-	public static func xip<S: AsyncSequence>(input: @autoclosure () -> DataReader<S>) -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
-		return .init()
-	}
-
-	public static var chunks: UnxipStream<Chunks> {
+	public static func xip<S: AsyncSequence>() -> UnxipStream<XIP<S>> where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
 		.init()
 	}
 
-	public static var files: UnxipStream<Files> {
+	public static func chunks() -> UnxipStream<Chunks> {
 		.init()
 	}
 
-	public static var disk: UnxipStream<Disk> {
+	public static func files() -> UnxipStream<Files> {
+		.init()
+	}
+
+	public static func disk() -> UnxipStream<Disk> {
 		.init()
 	}
 }
@@ -1589,7 +1585,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
 				}
 			}
 
-			for try await file in Unxip.makeStream(from: .xip(wrapping: input), to: .disk, input: DataReader(data: input), nil, nil, .init(compress: options.compress, dryRun: options.dryRun)) {
+			for try await file in Unxip.makeStream(from: .xip(), to: .disk(), input: DataReader(data: input), nil, nil, .init(compress: options.compress, dryRun: options.dryRun)) {
 				await statistics.note(file)
 				if options.verbose {
 					print(file.name)
