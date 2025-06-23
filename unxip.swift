@@ -156,8 +156,14 @@ public struct ErasedSequence<Element>: AsyncSequence {
 	}
 }
 
+#if swift(>=6.2)
+	public typealias AsyncSequenceWithSendableMetatype = AsyncSequence & SendableMetatype
+#else
+	public typealias AsyncSequenceWithSendableMetatype = AsyncSequence
+#endif
+
 extension AsyncThrowingStream where Element: Sendable, Failure == Error {
-	actor PermissiveActionLink<S: AsyncSequence> where S.Element == Element, S.AsyncIterator: Sendable {
+	actor PermissiveActionLink<S: AsyncSequenceWithSendableMetatype> where S.Element == Element, S.AsyncIterator: Sendable {
 		var iterator: S.AsyncIterator
 		let count: Int
 		var queued = [CheckedContinuation<Element?, Error>]()
@@ -205,6 +211,12 @@ protocol BackpressureProvider {
 	mutating func dequeue(_: Element)
 }
 
+#if swift(>=6.2)
+	typealias BackpressureProviderWithSendableMetatype = BackpressureProvider & SendableMetatype
+#else
+	typealias BackpressureProviderWithSendableMetatype = BackpressureProvider
+#endif
+
 final class CountedBackpressure<Element>: BackpressureProvider {
 	var count = 0
 	let max: Int
@@ -247,7 +259,7 @@ final class FileBackpressure: BackpressureProvider {
 	}
 }
 
-actor BackpressureStream<Element: Sendable, Backpressure: BackpressureProvider>: AsyncSequence where Backpressure.Element == Element {
+actor BackpressureStream<Element: Sendable, Backpressure: BackpressureProviderWithSendableMetatype>: AsyncSequence where Backpressure.Element == Element {
 	struct Iterator: AsyncIteratorProtocol {
 		let stream: BackpressureStream
 
@@ -819,12 +831,18 @@ public protocol StreamAperture {
 	associatedtype Next: StreamAperture
 	associatedtype Options: Sendable
 
-	static func transform(_: sending Input, options: Options?) -> Next.Input
+	static func transform(_: sending Input, options: Options?) -> sending Next.Input
 }
 
 protocol Decompressor {
 	static func decompress(data: [UInt8], decompressedSize: Int) throws -> [UInt8]
 }
+
+#if swift(>=6.2)
+	typealias DecompressorWithSendableMetatype = Decompressor & SendableMetatype
+#else
+	typealias DecompressorWithSendableMetatype = Decompressor
+#endif
 
 public enum DefaultDecompressor {
 	enum Zlib: Decompressor {
@@ -865,7 +883,7 @@ public enum DefaultDecompressor {
 	}
 }
 
-public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
+public enum XIP<S: AsyncSequenceWithSendableMetatype>: StreamAperture where S.Element: RandomAccessCollection, S.Element.Element == UInt8 {
 	public typealias Input = DataReader<S>
 	public typealias Next = Chunks
 
@@ -873,7 +891,7 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 		let zlibDecompressor: @Sendable ([UInt8], Int) throws -> [UInt8]
 		let lzmaDecompressor: @Sendable ([UInt8], Int) throws -> [UInt8]
 
-		init<Zlib: Decompressor, LZMA: Decompressor>(zlibDecompressor: Zlib.Type, lzmaDecompressor: LZMA.Type) {
+		init<Zlib: DecompressorWithSendableMetatype, LZMA: DecompressorWithSendableMetatype>(zlibDecompressor: Zlib.Type, lzmaDecompressor: LZMA.Type) {
 			self.zlibDecompressor = Zlib.decompress
 			self.lzmaDecompressor = LZMA.decompress
 		}
@@ -951,7 +969,7 @@ public enum XIP<S: AsyncSequence>: StreamAperture where S.Element: RandomAccessC
 		file.cap = file.position + contentSize
 	}
 
-	public static func transform(_ data: sending Input, options: Options?) -> Next.Input {
+	public static func transform(_ data: sending Input, options: Options?) -> sending Next.Input {
 		let options = options ?? Self.defaultOptions
 
 		let decompressionStream = ConcurrentStream<Void>(consumeResults: true)
@@ -1011,7 +1029,7 @@ public enum Chunks: StreamAperture {
 
 	public typealias Options = Never
 
-	public static func transform(_ chunks: sending Input, options: Options?) -> Next.Input {
+	public static func transform(_ chunks: sending Input, options: Options?) -> sending Next.Input {
 		let fileStream = BackpressureStream(backpressure: FileBackpressure(maxSize: 1_000_000_000), of: File.self)
 		fileStream.task {
 			var iterator = chunks.makeAsyncIterator()
@@ -1113,7 +1131,22 @@ public enum Files: StreamAperture {
 		.init(compress: true, dryRun: false)
 	}
 
-	public static func transform(_ files: sending Input, options: Options?) -> Next.Input {
+	private static func measureFilesystemOperation<T>(
+		on file: File,
+		named name: StaticString,
+		operation: () -> T
+	) -> T {
+		#if PROFILING
+			let id = OSSignpostID(log: filesystemLog)
+			os_signpost(.begin, log: filesystemLog, name: name, signpostID: id, "Starting %s for %s", name.description, file.name)
+			defer {
+				os_signpost(.end, log: filesystemLog, name: name, signpostID: id, "Completed")
+			}
+		#endif
+		return operation()
+	}
+
+	public static func transform(_ files: sending Input, options: Options?) -> sending Next.Input {
 		let options = options ?? Self.defaultOptions
 		let taskStream = ConcurrentStream<Void>()
 
@@ -1143,18 +1176,6 @@ public enum Files: StreamAperture {
 				await completion.waitForCompletions()
 
 				@Sendable
-				func measureFilesystemOperation<T>(named name: StaticString, _ operation: () -> T) -> T {
-					#if PROFILING
-						let id = OSSignpostID(log: filesystemLog)
-						os_signpost(.begin, log: filesystemLog, name: name, signpostID: id, "Starting %s for %s", name.description, file.name)
-						defer {
-							os_signpost(.end, log: filesystemLog, name: name, signpostID: id, "Completed")
-						}
-					#endif
-					return operation()
-				}
-
-				@Sendable
 				func warn(_ result: CInt, _ operation: String) {
 					if result != 0 {
 						perror("\(operation) \(file.name) failed")
@@ -1174,7 +1195,7 @@ public enum Files: StreamAperture {
 				@Sendable
 				func setStickyBit(on file: File) {
 					if file.sticky {
-						measureFilesystemOperation(named: "chmod") {
+						measureFilesystemOperation(on: file, named: "chmod") {
 							warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
 						}
 					}
@@ -1201,7 +1222,7 @@ public enum Files: StreamAperture {
 							return
 						}
 
-						measureFilesystemOperation(named: "link") {
+						measureFilesystemOperation(on: file, named: "link") {
 							warn(link(original, file.name), "linking")
 						}
 					}
@@ -1218,7 +1239,7 @@ public enum Files: StreamAperture {
 								return
 							}
 
-							measureFilesystemOperation(named: "symlink") {
+							measureFilesystemOperation(on: file, named: "symlink") {
 								warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, file.name), "symlinking")
 							}
 							setStickyBit(on: file)
@@ -1232,7 +1253,7 @@ public enum Files: StreamAperture {
 								return
 							}
 
-							measureFilesystemOperation(named: "mkdir") {
+							measureFilesystemOperation(on: file, named: "mkdir") {
 								warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
 							}
 							setStickyBit(on: file)
@@ -1257,7 +1278,7 @@ public enum Files: StreamAperture {
 									return
 								}
 
-								let fd = measureFilesystemOperation(named: "open") {
+								let fd = measureFilesystemOperation(on: file, named: "open") {
 									open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
 								}
 								if fd < 0 {
@@ -1265,7 +1286,7 @@ public enum Files: StreamAperture {
 									return
 								}
 								defer {
-									measureFilesystemOperation(named: "close") {
+									measureFilesystemOperation(on: file, named: "close") {
 										warn(close(fd), "closing")
 									}
 									setStickyBit(on: file)
@@ -1285,7 +1306,7 @@ public enum Files: StreamAperture {
 									// TODO: handle partial writes smarter
 									repeat {
 										written = data.withUnsafeBytes { data in
-											measureFilesystemOperation(named: "pwrite") {
+											measureFilesystemOperation(on: file, named: "pwrite") {
 												pwrite(fd, data.baseAddress, data.count, off_t(position))
 											}
 										}
@@ -1321,7 +1342,7 @@ public enum Disk: StreamAperture {
 
 	public typealias Options = Never
 
-	public static func transform(_ files: Input, options: Options?) -> Next.Input {
+	public static func transform(_ files: Input, options: Options?) -> sending Next.Input {
 		fatalError()
 	}
 }
@@ -1363,7 +1384,7 @@ public struct Unxip {
 	}
 }
 
-extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
+extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: AsyncSequenceWithSendableMetatype {
 	public func lockstepSplit() -> (AsyncThrowingStream<Element, Error>, AsyncThrowingStream<Element, Error>) {
 		let pal = AsyncThrowingStream.PermissiveActionLink<Self>(iterator: makeAsyncIterator(), count: 2)
 
@@ -1470,7 +1491,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
 		}
 
 		actor Statistics {
-			static let byteCountFormatter: ByteCountFormatter = {
+			let byteCountFormatter: ByteCountFormatter = {
 				let byteCountFormatter = ByteCountFormatter()
 				byteCountFormatter.allowsNonnumericFormatting = false
 				return byteCountFormatter
@@ -1543,9 +1564,9 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable {
 			}
 
 			func printStatistics() {
-				print("Read \(Self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
+				print("Read \(self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
 				if let total = total {
-					print(" (out of \(Self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
+					print(" (out of \(self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
 				}
 				if #available(macOS 13.0, iOS 16.0, watchOS 9.0, tvOS 16.0, *),
 					let start = start as? ContinuousClock.Instant
