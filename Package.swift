@@ -1,7 +1,7 @@
 // swift-tools-version:6.0
 import PackageDescription
 
-// hi saagar
+// hi saagar!
 
 #if os(macOS)
 	let dependencies = [Target.Dependency]()
