@@ -1413,7 +1413,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 				("s", "statistics", "Print statistics on completion."),
 				("v", "verbose", "Print xip file contents."),
 			]
-			static let version = "3.1"
+			static let version = "3.2"
 
 			var input: String?
 			var output: String?
