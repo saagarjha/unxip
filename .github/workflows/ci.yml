@@ -37,26 +37,27 @@ jobs:
         run: swift build --configuration release
 
       - name: Download Xcode
-        run: wget http://server.saagarjha.com/Xcode_15_beta.xip.encrypted
+        run: wget --progress=dot:giga http://server.saagarjha.com/Xcode_26_beta.xip.encrypted
 
         # I don't hate you, I just don't want to get sued
       - name: Decrypt Xcode
         env:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
-        run: openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_15_beta.xip.encrypted > Xcode_15_beta.xip
+        run: |
+          openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_26_beta.xip.encrypted > Xcode_26_beta.xip
+          # Linux runners don't have enough space to keep this around.
+          rm Xcode_26_beta.xip.encrypted
 
       - name: Run unxip
-        run: .build/release/unxip -s Xcode_15_beta.xip /tmp | grep -q 'Created 74201 files, 19130 directories, 7699 symlinks, and 16601 hardlinks'
+        run: .build/release/unxip -s Xcode_26_beta.xip /tmp | grep -q 'Created 98184 files, 26348 directories, 9650 symlinks, and 25521 hardlinks'
 
       - name: Run xip
         if: ${{ startsWith( matrix.os, 'macos' ) }}
-        run: xip --expand Xcode_15_beta.xip
+        run: xip --expand Xcode_26_beta.xip
 
-        # diff on Monterey is gnudiff, which exits with EXIT_TROUBLE (2) if it
-        # finds problems. The Xcode bundle has a ruby symlink that is recursive,
-        # which trips this. So don't rely on the status, but instead use the
-        # output exclusively. Note that this means we need to test for existence
-        # ourselves!
+        # Xcode 26 has a hardlink to a parent directory, which trips up diff -r.
+        # --no-dereference, despite not being documented, is available and can
+        # avoid getting stuck in an infinite loop in this case.
       - name: Validate Xcode
         if: ${{ startsWith( matrix.os, 'macos' ) }}
-        run: diff -r /tmp/Xcode-beta.app Xcode-beta.app > diff || true; cat diff && ! test -s diff && test -d Xcode-beta.app
+        run: diff -r --no-dereference /tmp/Xcode-beta.app Xcode-beta.app
