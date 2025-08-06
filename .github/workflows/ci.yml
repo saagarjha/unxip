@@ -37,23 +37,27 @@ jobs:
         run: swift build --configuration release
 
       - name: Download Xcode
-        run: wget --progress=dot:giga http://server.saagarjha.com/Xcode_26_beta.xip.encrypted
+        run: |
+          wget --progress=dot:giga https://github.com/saagarjha/unxip/releases/download/_xcode/Xcode_26_beta_5_Apple_silicon.xip.encrypted.1
+          wget --progress=dot:giga https://github.com/saagarjha/unxip/releases/download/_xcode/Xcode_26_beta_5_Apple_silicon.xip.encrypted.2
+          cat Xcode_26_beta_5_Apple_silicon.xip.encrypted.1 Xcode_26_beta_5_Apple_silicon.xip.encrypted.2 > Xcode_26_beta_5_Apple_silicon.xip.encrypted
+          rm Xcode_26_beta_5_Apple_silicon.xip.encrypted.*
 
         # I don't hate you, I just don't want to get sued
       - name: Decrypt Xcode
         env:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
         run: |
-          openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_26_beta.xip.encrypted > Xcode_26_beta.xip
+          openssl enc -aes-256-cbc -d -pass 'env:ENCRYPTION_KEY' -in Xcode_26_beta_5_Apple_silicon.xip.encrypted > Xcode_26_beta_5_Apple_silicon.xip
           # Linux runners don't have enough space to keep this around.
-          rm Xcode_26_beta.xip.encrypted
+          rm Xcode_26_beta_5_Apple_silicon.xip.encrypted
 
       - name: Run unxip
-        run: .build/release/unxip -s Xcode_26_beta.xip /tmp | grep -q 'Created 98184 files, 26348 directories, 9650 symlinks, and 25521 hardlinks'
+        run: .build/release/unxip -s Xcode_26_beta_5_Apple_silicon.xip /tmp | grep -q 'Created 97302 files, 26175 directories, 9665 symlinks, and 25560 hardlinks'
 
       - name: Run xip
         if: ${{ startsWith( matrix.os, 'macos' ) }}
-        run: xip --expand Xcode_26_beta.xip
+        run: xip --expand Xcode_26_beta_5_Apple_silicon.xip
 
         # Xcode 26 has a hardlink to a parent directory, which trips up diff -r.
         # --no-dereference, despite not being documented, is available and can
