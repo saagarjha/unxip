@@ -547,6 +547,46 @@ extension DataReader where S == ErasedSequence<[UInt8]> {
 		self.init(data: Self.data(readingFrom: descriptor))
 	}
 
+	private static func read(size: Int, from io: DispatchIO) async throws -> [UInt8]? {
+		#if PROFILING
+			let id = OSSignpostID(log: readLog)
+			os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
+		#endif
+		return try await withCheckedThrowingContinuation { continuation in
+			var chunk = DispatchData.empty
+			io.read(offset: 0, length: size, queue: .main) { done, data, error in
+				guard error == 0 else {
+					continuation.resume(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(error)))
+					return
+				}
+
+				chunk.append(data!)
+
+				#if PROFILING
+					os_signpost(.event, log: readLog, name: "Read", signpostID: id, "Read %td bytes", data!.count)
+				#endif
+
+				if done {
+					if chunk.isEmpty {
+						#if PROFILING
+							os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended final read")
+						#endif
+						continuation.resume(returning: nil)
+					} else {
+						#if PROFILING
+							os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
+						#endif
+						continuation.resume(
+							returning: [UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
+								_ = chunk.copyBytes(to: buffer, from: nil)
+								count = chunk.count
+							})
+					}
+				}
+			}
+		}
+	}
+
 	public static func data(readingFrom descriptor: CInt) -> S {
 		let stream = BackpressureStream(backpressure: CountedBackpressure(max: 16), of: [UInt8].self)
 		let io = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .main) { _ in
@@ -560,50 +600,11 @@ extension DataReader where S == ErasedSequence<[UInt8]> {
 			let readSize = sysconf(CInt(_SC_PAGESIZE)) * 16
 		#endif
 
-		Task {
-			while await withCheckedContinuation({ continuation in
-				#if PROFILING
-					let id = OSSignpostID(log: readLog)
-					os_signpost(.begin, log: readLog, name: "Read", signpostID: id, "Starting read")
-				#endif
-				var chunk = DispatchData.empty
-				io.read(offset: 0, length: readSize, queue: .main) { done, data, error in
-					guard error == 0 else {
-						stream.finish(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(error)))
-						continuation.resume(returning: false)
-						return
-					}
-
-					chunk.append(data!)
-
-					#if PROFILING
-						os_signpost(.event, log: readLog, name: "Read", signpostID: id, "Read %td bytes", data!.count)
-					#endif
-
-					if done {
-						if chunk.isEmpty {
-							#if PROFILING
-								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended final read")
-							#endif
-							stream.finish()
-							continuation.resume(returning: false)
-						} else {
-							#if PROFILING
-								os_signpost(.end, log: readLog, name: "Read", signpostID: id, "Ended read")
-							#endif
-							let chunk = [UInt8](unsafeUninitializedCapacity: chunk.count) { buffer, count in
-								_ = chunk.copyBytes(to: buffer, from: nil)
-								count = chunk.count
-							}
-							Task {
-								await stream.yield(chunk)
-								continuation.resume(returning: true)
-							}
-						}
-					}
-				}
-			}) {
+		stream.task {
+			while let chunk = try await Self.read(size: readSize, from: io) {
+				await stream.yield(chunk)
 			}
+			stream.finish()
 		}
 
 		return .init(sequence: stream)
