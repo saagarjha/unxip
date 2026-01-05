@@ -669,14 +669,7 @@ public struct File: Sendable {
 	}
 
 	#if canImport(Darwin)
-		static let blocksize = {
-			var buffer = stat()
-			// FIXME: This relies on a previous chdir to the output directory
-			stat(".", &buffer)
-			return buffer.st_blksize
-		}()
-
-		func compressedData() async -> [UInt8]? {
+		func compressedData(blocksizeHint: UInt32? = nil) async -> [UInt8]? {
 			guard !looksIncompressible else {
 				return nil
 			}
@@ -684,7 +677,7 @@ public struct File: Sendable {
 			// There is no benefit on APFS to using transparent compression if
 			// the data is less than one allocation block.
 			let totalSize = self.data.map(\.count).reduce(0, +)
-			guard totalSize > Self.blocksize else {
+			guard totalSize > blocksizeHint ?? 0 else {
 				return nil
 			}
 
@@ -774,7 +767,7 @@ public struct File: Sendable {
 			}
 		}
 
-		func write(compressedData data: [UInt8], toDescriptor descriptor: CInt) -> Bool {
+		func write(compressedData data: [UInt8], toDescriptor descriptor: CInt, outputDescriptor output: CInt) -> Bool {
 			let uncompressedSize = self.data.map(\.count).reduce(0, +)
 			let attribute =
 				"cmpf".utf8.reversed()  // magic
@@ -794,7 +787,7 @@ public struct File: Sendable {
 				return false
 			}
 
-			let resourceForkDescriptor = open(name + _PATH_RSRCFORKSPEC, O_WRONLY | O_CREAT, 0o666)
+			let resourceForkDescriptor = openat(output, name + _PATH_RSRCFORKSPEC, O_WRONLY | O_CREAT, 0o666)
 			guard resourceForkDescriptor >= 0 else {
 				return false
 			}
@@ -1121,10 +1114,12 @@ public enum Files: StreamAperture {
 	public struct Options: Sendable {
 		public let compress: Bool
 		public let dryRun: Bool
+		public let output: CInt
 
-		public init(compress: Bool, dryRun: Bool) {
+		public init(compress: Bool, dryRun: Bool, output: CInt? = nil) {
 			self.compress = compress
 			self.dryRun = dryRun
+			self.output = output ?? AT_FDCWD
 		}
 	}
 
@@ -1173,6 +1168,13 @@ public enum Files: StreamAperture {
 			var hardlinks = [File.Identifier: (String, Task<Void, Error>)]()
 			var directories = [Substring: Task<Void, Error>]()
 
+			#if canImport(Darwin)
+				var buffer = statfs()
+				let blocksize = fstatfs(options.output, &buffer) == 0 ? buffer.f_bsize : nil
+			#else
+				let blocksize = UInt32?.none
+			#endif
+
 			for try await file in files {
 				await completion.waitForCompletions()
 
@@ -1197,7 +1199,7 @@ public enum Files: StreamAperture {
 				func setStickyBit(on file: File) {
 					if file.sticky {
 						measureFilesystemOperation(on: file, named: "chmod") {
-							warn(chmod(file.name, mode_t(file.mode)), "Setting sticky bit on")
+							warn(fchmodat(options.output, file.name, mode_t(file.mode), 0), "Setting sticky bit on")
 						}
 					}
 				}
@@ -1224,7 +1226,7 @@ public enum Files: StreamAperture {
 						}
 
 						measureFilesystemOperation(on: file, named: "link") {
-							warn(link(original, file.name), "linking")
+							warn(linkat(options.output, original, options.output, file.name, 0), "linking")
 						}
 					}
 					continue
@@ -1241,7 +1243,7 @@ public enum Files: StreamAperture {
 							}
 
 							measureFilesystemOperation(on: file, named: "symlink") {
-								warn(symlink(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, file.name), "symlinking")
+								warn(symlinkat(String(data: Data(file.data.map(Array.init).reduce([], +)), encoding: .utf8)!, options.output, file.name), "symlinking")
 							}
 							setStickyBit(on: file)
 						}
@@ -1255,7 +1257,7 @@ public enum Files: StreamAperture {
 							}
 
 							measureFilesystemOperation(on: file, named: "mkdir") {
-								warn(mkdir(file.name, mode_t(file.mode & 0o777)), "creating directory at")
+								warn(mkdirat(options.output, file.name, mode_t(file.mode & 0o777)), "creating directory at")
 							}
 							setStickyBit(on: file)
 						}
@@ -1271,7 +1273,7 @@ public enum Files: StreamAperture {
 									let compressedData =
 										options.compress
 										? try! await compressionStream.addTask {
-											await file.compressedData()
+											await file.compressedData(blocksizeHint: blocksize)
 										}.result.get() : nil
 								#endif
 
@@ -1280,7 +1282,7 @@ public enum Files: StreamAperture {
 								}
 
 								let fd = measureFilesystemOperation(on: file, named: "open") {
-									open(file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+									openat(options.output, file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
 								}
 								if fd < 0 {
 									warn(fd, "creating file at")
@@ -1295,7 +1297,7 @@ public enum Files: StreamAperture {
 
 								#if canImport(Darwin)
 									if let compressedData = compressedData,
-										file.write(compressedData: compressedData, toDescriptor: fd)
+										file.write(compressedData: compressedData, toDescriptor: fd, outputDescriptor: options.output)
 									{
 										return
 									}
@@ -1604,10 +1606,18 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 				handle = FileHandle.standardInput
 			}
 
-			if let output = options.output {
-				guard chdir(output) == 0 else {
-					fputs("Failed to access output directory at \(output): \(String(cString: strerror(errno)))", stderr)
+			let output = options.output.flatMap {
+				let output = open($0, O_RDONLY | O_DIRECTORY)
+				guard output >= 0 else {
+					fputs("Failed to access output directory at \($0): \(String(cString: strerror(errno)))\n", stderr)
 					exit(EXIT_FAILURE)
+				}
+				return output
+			}
+
+			defer {
+				if let output {
+					close(output)
 				}
 			}
 
@@ -1620,7 +1630,10 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 				}
 			}
 
-			for try await file in Unxip.makeStream(from: .xip(), to: .disk(), input: DataReader(data: input), nil, nil, .init(compress: options.compress, dryRun: options.dryRun)) {
+			for try await file in Unxip.makeStream(
+				from: .xip(), to: .disk(), input: DataReader(data: input),
+				nil, nil, .init(compress: options.compress, dryRun: options.dryRun, output: output))
+			{
 				await statistics.note(file)
 				if options.verbose {
 					print(file.name)
