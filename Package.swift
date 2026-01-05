@@ -36,7 +36,7 @@ import PackageDescription
 let package = Package(
 	name: "unxip",
 	platforms: [
-		.macOS(.v11), .iOS(.v14), .watchOS(.v7),
+		.macOS(.v10_15), .iOS(.v13), .watchOS(.v6),
 	],
 	products: [
 		.executable(name: "unxip", targets: ["unxip"]),

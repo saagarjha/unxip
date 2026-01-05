@@ -1592,8 +1592,13 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			let handle: FileHandle
 			if let input = options.input {
 				handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: input))
-				try handle.seekToEnd()
-				await statistics.setTotal(Int(try handle.offset()))
+				if #available(macOS 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+					try handle.seekToEnd()
+					await statistics.setTotal(Int(try handle.offset()))
+				} else {
+					handle.seekToEndOfFile()
+					await statistics.setTotal(Int(handle.offsetInFile))
+				}
 				try handle.seek(toOffset: 0)
 			} else {
 				handle = FileHandle.standardInput
