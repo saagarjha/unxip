@@ -18,13 +18,13 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [macos-15, ubuntu-22.04]
+        os: [macos-26, ubuntu-24.04]
     name: Test
     runs-on: ${{ matrix.os }}
     environment: ci
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       - name: System Info
         run: uname -a
@@ -32,6 +32,10 @@ jobs:
       - name: Install Swift
         if: ${{ !startsWith( matrix.os, 'macos' ) }}
         run: eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" && brew install swift
+
+      - name: Install dependencies
+        if: ${{ !startsWith( matrix.os, 'macos' ) }}
+        run: sudo apt install liblzma-dev zlib1g-dev
 
       - name: Build unxip
         run: swift build --configuration release
