@@ -3,20 +3,21 @@ PREFIX ?= /usr/local
 .PHONY: all
 all: unxip
 
-unxip: unxip.swift
-	swiftc -O -whole-module-optimization -parse-as-library $<
+unxip:
+	swift build -c release
 
 .PHONY: clean
 clean:
-	rm unxip
+	swift package clean
 
 .PHONY: install
 install:
-	install unxip $(PREFIX)/bin/
+	install -d $(PREFIX)/bin
+	install .build/release/unxip $(PREFIX)/bin/
 
 .PHONY: uninstall
 uninstall:
-	rm $(PREFIX)/bin/unxip
+	rm -f $(PREFIX)/bin/unxip
 
 .PHONY: format
 format:
