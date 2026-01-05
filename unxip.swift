@@ -1430,7 +1430,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 					} + [option(name: nil, has_arg: 0, flag: nil, val: 0)]
 				repeat {
 					let result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, Self.options.map(\.flag).reduce("", +), options, nil)
-					if result < 0 {
+					guard result >= 0 else {
 						break
 					}
 					switch UnicodeScalar(UInt32(result)) {
