@@ -1,9 +1,10 @@
+import Foundation
+
 #if canImport(Glibc)
 	@preconcurrency import SwiftGlibc  // stdout, stderr
 #else
 	@preconcurrency import unistd  // optind
 #endif
-import Foundation
 
 #if canImport(Compression)
 	import Compression
@@ -1570,7 +1571,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			func setTotal(_ total: Int) {
 				self.total = total
 			}
-			
+
 			func setPrintsReadProgress(_ printsReadProgress: Bool) {
 				self.printsReadProgress = printsReadProgress
 			}
