@@ -1,10 +1,9 @@
-import Foundation
-
 #if canImport(Glibc)
 	@preconcurrency import SwiftGlibc  // stdout, stderr
 #else
 	@preconcurrency import unistd  // optind
 #endif
+import Foundation
 
 #if canImport(Compression)
 	import Compression
