@@ -1414,6 +1414,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 				("h", "help", "Print this help message."),
 				("n", "dry-run", "Dry run. (Often useful with -v.)"),
 				("s", "statistics", "Print statistics on completion."),
+				("p", "progress", "Print read progress continuously."),
 				("v", "verbose", "Print xip file contents."),
 			]
 			static let version = "3.3"
@@ -1423,6 +1424,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			var compress = true
 			var dryRun = false
 			var printStatistics = false
+			var printReadProgress = false
 			var verbose = false
 
 			init() {
@@ -1446,6 +1448,8 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 							Self.printUsage(nominally: true)
 						case "s":
 							printStatistics = true
+						case "p":
+							printReadProgress = true
 						case "v":
 							verbose = true
 						default:
@@ -1517,6 +1521,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			var read = 0
 			var total: Int?
 			var identifiers = Set<File.Identifier>()
+			var printsReadProgress = false
 
 			let source: DispatchSourceSignal
 
@@ -1565,8 +1570,35 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			func setTotal(_ total: Int) {
 				self.total = total
 			}
+			
+			func setPrintsReadProgress(_ printsReadProgress: Bool) {
+				self.printsReadProgress = printsReadProgress
+			}
+
+			func cleanReadProgress() {
+				// Clear all the line
+				print("\r\u{1B}[K", terminator: "")
+			}
+
+			func printReadProgress() {
+				var output = "\rRead \(read)"
+				if let total = total {
+					output += " of \(total) bytes"
+					if total > 0 {
+						let percentage = (Double(read) / Double(total)) * 100.0
+						output += " (\(String(format: "%.1f%%", percentage)))"
+					}
+				}
+				// Fill all the line
+				output += "\u{1B}[K"
+				print(output, terminator: "")
+				fflush(stdout)
+			}
 
 			func printStatistics() {
+				if printsReadProgress {
+					cleanReadProgress()
+				}
 				print("Read \(self.byteCountFormatter.string(fromByteCount: Int64(read)))", terminator: "")
 				if let total = total {
 					print(" (out of \(self.byteCountFormatter.string(fromByteCount: Int64(total))))", terminator: "")
@@ -1624,9 +1656,18 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 			let file = DataReader.data(readingFrom: handle.fileDescriptor)
 			let (data, input) = file.lockstepSplit()
 
+			await statistics.setPrintsReadProgress(options.printReadProgress)
 			Task {
-				for try await data in data {
-					await statistics.noteRead(size: data.count)
+				var lastPrint = Date()
+				for try await chunk in data {
+					await statistics.noteRead(size: chunk.count)
+					if options.printReadProgress {
+						let now = Date()
+						if now.timeIntervalSince(lastPrint) > 0.25 {
+							lastPrint = now
+							await statistics.printReadProgress()
+						}
+					}
 				}
 			}
 
@@ -1640,6 +1681,11 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 				}
 			}
 
+			if options.printReadProgress {
+				// Print the last progress and clear the line
+				await statistics.printReadProgress()
+				await statistics.cleanReadProgress()
+			}
 			if options.printStatistics {
 				await statistics.printStatistics()
 			}
