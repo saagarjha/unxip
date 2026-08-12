@@ -4,6 +4,25 @@ import PackageDescription
 #if os(macOS)
 	let dependencies = [Target.Dependency]()
 	let systemLibraries = [Target]()
+#elseif os(Android)
+	// The Android NDK modulemap already provides the zlib and getopt
+	// modules, so defining our own would clash. GNUSource and lzma
+	// still need shims.
+	let dependencies: [Target.Dependency] = [
+		.target(name: "GNUSource"),
+		.target(name: "lzma"),
+	]
+	let systemLibraries: [Target] = [
+		.systemLibrary(
+			name: "GNUSource"
+		),
+		.systemLibrary(
+			name: "lzma",
+			providers: [
+				.aptItem(["liblzma-dev"])
+			]
+		),
+	]
 #else
 	let dependencies: [Target.Dependency] = [
 		.target(name: "GNUSource"),
