@@ -455,6 +455,7 @@ extension option {
 enum UnxipError: Error {
 	case truncated
 	case invalid
+	case filesystemFailure(String)
 
 	static func `throw`<T>(_ error: @autoclosure () -> Self, ifNil expression: @autoclosure () async throws -> T?) async throws -> T {
 		if let value = try await expression() {
@@ -1185,6 +1186,58 @@ public enum Files: StreamAperture {
 					}
 				}
 
+				// Fallback for when linkat() is unavailable (e.g. Android, where
+				// SELinux denies hard links in app-private directories): copy the
+				// original's contents into a new file instead.
+				@Sendable
+				func copyFile(at original: String, to destination: String) throws {
+					let source = openat(options.output, original, O_RDONLY)
+					guard source >= 0 else {
+						throw UnxipError.filesystemFailure("opening hardlink source \(original): \(String(cString: strerror(errno)))")
+					}
+					defer { _ = close(source) }
+
+				let destinationDescriptor = measureFilesystemOperation(on: file, named: "open") {
+					openat(options.output, destination, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
+				}
+					guard destinationDescriptor >= 0 else {
+						throw UnxipError.filesystemFailure("creating file at \(destination): \(String(cString: strerror(errno)))")
+					}
+					defer {
+						measureFilesystemOperation(on: file, named: "close") {
+							warn(close(destinationDescriptor), "closing")
+						}
+						setStickyBit(on: file)
+					}
+
+					var buffer = [UInt8](repeating: 0, count: 1 << 20)
+					while true {
+						let bytesRead = buffer.withUnsafeMutableBytes { buffer in
+							measureFilesystemOperation(on: file, named: "read") {
+								read(source, buffer.baseAddress!, buffer.count)
+							}
+						}
+						if bytesRead < 0 {
+							throw UnxipError.filesystemFailure("reading hardlink source \(original): \(String(cString: strerror(errno)))")
+						}
+						if bytesRead == 0 {
+							break
+						}
+						var written = 0
+						repeat {
+							let result = buffer.withUnsafeBytes { buffer in
+								measureFilesystemOperation(on: file, named: "pwrite") {
+									pwrite(destinationDescriptor, buffer.baseAddress! + written, bytesRead - written, off_t(written))
+								}
+							}
+							if result < 0 {
+								throw UnxipError.filesystemFailure("copying to \(destination): \(String(cString: strerror(errno)))")
+							}
+							written += result
+						} while written != bytesRead
+					}
+				}
+
 				// The assumption is that all directories are provided without trailing slashes
 				func parentDirectory<S: StringProtocol>(of path: S) -> S.SubSequence {
 					path[..<path.lastIndex(of: "/")!]
@@ -1225,8 +1278,14 @@ public enum Files: StreamAperture {
 							return
 						}
 
-						measureFilesystemOperation(on: file, named: "link") {
-							warn(linkat(options.output, original, options.output, file.name, 0), "linking")
+						let linked = measureFilesystemOperation(on: file, named: "link") {
+							linkat(options.output, original, options.output, file.name, 0)
+						}
+						if linked != 0 {
+							// Hardlinks may be unavailable (e.g. Android's SELinux
+							// policy denies link(2) in app-private directories).
+							// Fall back to copying the original's contents.
+							try copyFile(at: original, to: file.name)
 						}
 					}
 					continue
