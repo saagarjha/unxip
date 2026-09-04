@@ -1288,12 +1288,7 @@ public enum Files: StreamAperture {
 								}
 
 								let fd = measureFilesystemOperation(on: file, named: "open") {
-									#if os(Android)
-										// bionic's openat() is variadic and unavailable to Swift; use the GNUSource shim.
-										unxip_openat(options.output, file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
-									#else
-										openat(options.output, file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
-									#endif
+									openat(options.output, file.name, O_CREAT | O_WRONLY, mode_t(file.mode & 0o777))
 								}
 								if fd < 0 {
 									warn(fd, "creating file at")
