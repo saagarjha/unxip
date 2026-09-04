@@ -2,6 +2,12 @@
 	@preconcurrency import SwiftGlibc  // stdout, stderr
 #else
 	@preconcurrency import unistd  // optind
+	#if canImport(cpio)
+		import cpio  // C_ISREG, C_ISDIR, C_ISLNK, C_ISVTX, MAGIC
+	#endif
+	#if canImport(Android)
+		@preconcurrency import Android  // SIG_IGN, stdout, stderr
+	#endif
 #endif
 import Foundation
 
@@ -1310,7 +1316,7 @@ public enum Files: StreamAperture {
 									repeat {
 										written = data.withUnsafeBytes { data in
 											measureFilesystemOperation(on: file, named: "pwrite") {
-												pwrite(fd, data.baseAddress, data.count, off_t(position))
+												pwrite(fd, data.baseAddress!, data.count, off_t(position))
 											}
 										}
 										if written < 0 {
@@ -1430,8 +1436,14 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 					Self.options.map {
 						option(name: $0.name, has_arg: no_argument, flag: nil, val: $0.flag)
 					} + [option(name: nil, has_arg: 0, flag: nil, val: 0)]
+				#if os(Android)
+					// bionic's getopt_long takes non-optional argv pointers
+					let argv = UnsafePointer(UnsafeRawPointer(CommandLine.unsafeArgv).assumingMemoryBound(to: UnsafeMutablePointer<CChar>.self))
+				#else
+					let argv = CommandLine.unsafeArgv
+				#endif
 				repeat {
-					let result = getopt_long(CommandLine.argc, CommandLine.unsafeArgv, Self.options.map(\.flag).reduce("", +), options, nil)
+					let result = getopt_long(CommandLine.argc, argv, Self.options.map(\.flag).reduce("", +), options, nil)
 					guard result >= 0 else {
 						break
 					}
@@ -1528,7 +1540,7 @@ extension AsyncSequence where Element: Sendable, AsyncIterator: Sendable, Self: 
 					watchedSignal = SIGINFO
 				#else
 					watchedSignal = SIGUSR1
-					signal(watchedSignal, SIG_IGN)
+					_ = signal(watchedSignal, SIG_IGN)
 				#endif
 
 				let source = DispatchSource.makeSignalSource(signal: watchedSignal)
